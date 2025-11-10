@@ -153,6 +153,9 @@ def parse_args() -> argparse.Namespace:
     )
     generate_parser.add_argument("--device", type=str, default=_default_device())
 
+    info_parser = subparsers.add_parser("info", help="Print information about a model preset")
+    info_parser.add_argument("model", choices=MODEL_PRESETS.keys(), help="Model size preset")
+
     return parser.parse_args()
 
 
@@ -256,12 +259,44 @@ def _run_generation(args: argparse.Namespace) -> None:
     print(decoded)
 
 
+def _count_parameters(model: TransformerLM) -> int:
+    return sum(p.numel() for p in model.parameters())
+
+
+def _format_param_count(count: int) -> str:
+    if count >= 1_000_000_000:
+        return f"{count / 1_000_000_000:.2f}B"
+    if count >= 1_000_000:
+        return f"{count / 1_000_000:.2f}M"
+    if count >= 1_000:
+        return f"{count / 1_000:.2f}K"
+    return str(count)
+
+
+def _run_info(args: argparse.Namespace) -> None:
+    config = MODEL_PRESETS[args.model]
+    model = TransformerLM(config)
+    params = _count_parameters(model)
+    print(f"Model '{args.model}'")
+    print(f"  parameters : {params:,} (~{_format_param_count(params)})")
+    print(f"  vocab_size : {config.vocab_size}")
+    print(f"  seq_len    : {config.seq_len}")
+    print(f"  d_model    : {config.d_model}")
+    print(f"  n_layers   : {config.n_layers}")
+    print(f"  n_heads    : {config.n_heads}")
+    print(f"  d_ff       : {config.d_ff}")
+    print(f"  dropout    : {config.dropout}")
+    print(f"  rotary_base: {config.rotary_base}")
+
+
 def main() -> None:
     args = parse_args()
     if args.command == "train":
         _run_training(args)
     elif args.command == "generate":
         _run_generation(args)
+    elif args.command == "info":
+        _run_info(args)
     else:  # pragma: no cover
         raise ValueError(f"Unknown command: {args.command}")
 

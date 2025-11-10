@@ -37,6 +37,12 @@ Switch to a word-and-punctuation tokenizer by adding `--tokenizer word`:
 python -m codex_lm train pico tinystories --tokenizer word --steps 2000 --wandb
 ```
 
+See preset details (layers, dimensions, parameter counts) without launching training:
+
+```bash
+python -m codex_lm info nano
+```
+
 If you only need a smaller subset of a large corpus (to reduce RAM or download time), limit the amount of text consumed via `--data-frac`, e.g.:
 
 ```bash
