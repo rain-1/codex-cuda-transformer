@@ -22,7 +22,19 @@ The Python implementation lives under [`python/codex_lm`](python/codex_lm). Inst
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r python/requirements.txt
-python -m codex_lm pico tinyshakespeare --steps 2000 --wandb
+python -m codex_lm train pico tinyshakespeare --steps 2000 --wandb
+```
+
+To train on [TinyStories](https://huggingface.co/datasets/roneneldan/TinyStories) instead, swap the dataset argument:
+
+```bash
+python -m codex_lm train pico tinystories --steps 2000 --wandb
+```
+
+If you only need a smaller subset of a large corpus (to reduce RAM or download time), limit the amount of text consumed via `--data-frac`, e.g.:
+
+```bash
+python -m codex_lm train pico tinystories --data-frac 0.1 --steps 2000 --wandb
 ```
 
 By default the script downloads the Tiny Shakespeare dataset and uses a character-level tokenizer. Use `--data custom --data-path /path/to/text.txt` to point at another corpus. Mixed precision, gradient accumulation, cosine scheduling, and optional `torch.compile` support are built in. Enable Weights & Biases logging with `--wandb` and optionally customize the project/run name via `--wandb-project` and `--wandb-run`.
@@ -43,7 +55,7 @@ The binary shares the same preset definitions and training tricks as the Python 
 
 ## Datasets
 
-Text files are stored under the `data/` directory. The Python utilities can download Tiny Shakespeare automatically, while the C++ runner expects the file to exist locally. For larger experiments consider datasets such as Simple English Wikipedia once tokenization is adapted.
+Text files are stored under the `data/` directory. The Python utilities can download Tiny Shakespeare automatically, while the C++ runner expects the file to exist locally. TinyStories downloads are pulled directly from Hugging Face (training and validation splits) and merged into a single `tinystories.txt` file with `<|endoftext|>`/`<|end_of_sequence|>` markers replaced by blank lines. When a dataset exceeds ~256 MiB it is automatically converted into a disk-backed token cache (`*.tokens.npy` + metadata) so that training can stream batches without loading every token into RAM; the first run will create this cache and later runs reuse it. Use `--data-frac <fraction>` (e.g., `0.1` for 10 %) to keep only the leading portion of massive corpora. For larger experiments consider datasets such as Simple English Wikipedia once tokenization is adapted.
 
 ## Checkpoints
 
