@@ -12,7 +12,7 @@ from torch.utils.data import DataLoader, Dataset
 
 from codex_lm.config import MODEL_PRESETS, ModelConfig
 from codex_lm.data import (
-    CharacterTokenizer,
+    Tokenizer,
     build_dataset,
     collate_batch,
     download_text,
@@ -40,6 +40,12 @@ def _add_data_args(parser: argparse.ArgumentParser) -> None:
         default=1.0,
         help="Fraction of the dataset to keep (0 < frac <= 1).",
     )
+    parser.add_argument(
+        "--tokenizer",
+        choices=["char", "word"],
+        default="char",
+        help="Tokenizer granularity (character or word/punctuation).",
+    )
 
 
 def _resolve_dataset(choice: str, data_path: pathlib.Path | None) -> pathlib.Path:
@@ -55,8 +61,13 @@ def _resolve_dataset(choice: str, data_path: pathlib.Path | None) -> pathlib.Pat
     return data_path
 
 
-def _load_tokenizer(path: pathlib.Path, seq_len: int, fraction: float) -> tuple[Dataset, Dataset, CharacterTokenizer]:
-    return build_dataset(path, seq_len, fraction=fraction)
+def _load_tokenizer(
+    path: pathlib.Path,
+    seq_len: int,
+    fraction: float,
+    tokenizer_kind: str,
+) -> tuple[Dataset, Dataset, Tokenizer]:
+    return build_dataset(path, seq_len, fraction=fraction, tokenizer=tokenizer_kind)  # type: ignore[arg-type]
 
 
 def _coerce_model_config(config: Any) -> ModelConfig:
@@ -90,33 +101,6 @@ def _load_checkpoint(path: pathlib.Path) -> dict[str, Any]:
     return checkpoint
 
 
-<<<<<<< HEAD
-def _default_device() -> str:
-    return "cuda" if torch.cuda.is_available() else "cpu"
-
-
-def _add_data_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("data", choices=["tinyshakespeare", "custom"], help="Dataset choice")
-    parser.add_argument("--data-path", type=pathlib.Path, default=None, help="Path to custom dataset")
-
-
-def _resolve_dataset(choice: str, data_path: pathlib.Path | None) -> pathlib.Path:
-    if choice == "tinyshakespeare":
-        return download_text(
-            "tinyshakespeare.txt",
-            "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt",
-        )
-    if data_path is None:
-        raise ValueError("--data-path must be provided when using custom dataset")
-    return data_path
-
-
-def _load_tokenizer(path: pathlib.Path, seq_len: int) -> tuple[Dataset, Dataset, CharacterTokenizer]:
-    return build_dataset(path, seq_len)
-
-
-=======
->>>>>>> codex/add-inference-method-for-trained-model-5xn1kp
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Codex Transformer utilities")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -172,7 +156,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _maybe_adjust_config(config: ModelConfig, tokenizer: CharacterTokenizer) -> ModelConfig:
+def _maybe_adjust_config(config: ModelConfig, tokenizer: Tokenizer) -> ModelConfig:
     if tokenizer.vocab_size == config.vocab_size:
         return config
     print(
@@ -193,11 +177,9 @@ def _maybe_adjust_config(config: ModelConfig, tokenizer: CharacterTokenizer) -> 
 def _run_training(args: argparse.Namespace) -> None:
     preset_config = MODEL_PRESETS[args.model]
     data_path = _resolve_dataset(args.data, args.data_path)
-<<<<<<< HEAD
-    train_dataset, val_dataset, tokenizer = _load_tokenizer(data_path, preset_config.seq_len)
-=======
-    train_dataset, val_dataset, tokenizer = _load_tokenizer(data_path, preset_config.seq_len, args.data_frac)
->>>>>>> codex/add-inference-method-for-trained-model-5xn1kp
+    train_dataset, val_dataset, tokenizer = _load_tokenizer(
+        data_path, preset_config.seq_len, args.data_frac, args.tokenizer
+    )
     model_config = _maybe_adjust_config(preset_config, tokenizer)
 
     train_loader = DataLoader(
@@ -235,6 +217,7 @@ def _run_training(args: argparse.Namespace) -> None:
         sample_prompts=tuple(args.sample_prompt),
         sample_max_new_tokens=args.sample_max_new_tokens,
         sample_dir=args.sample_dir,
+        tokenizer=args.tokenizer,
     )
 
     model = TransformerLM(train_config.model_config())
@@ -245,29 +228,17 @@ def _run_training(args: argparse.Namespace) -> None:
 
 
 def _run_generation(args: argparse.Namespace) -> None:
-<<<<<<< HEAD
-    checkpoint = torch.load(args.checkpoint, map_location="cpu")
-    config_dict = checkpoint["config"]
-    override_model = config_dict.get("override_model")
-    if override_model is not None:
-        model_config = override_model
-=======
     checkpoint = _load_checkpoint(args.checkpoint)
     config_dict = checkpoint["config"]
     override_model = config_dict.get("override_model")
     if override_model is not None:
         model_config = _coerce_model_config(override_model)
->>>>>>> codex/add-inference-method-for-trained-model-5xn1kp
     else:
         model_name = config_dict["model_name"]
         model_config = MODEL_PRESETS[model_name]
 
     data_path = _resolve_dataset(args.data, args.data_path)
-<<<<<<< HEAD
-    _, _, tokenizer = _load_tokenizer(data_path, model_config.seq_len)
-=======
-    _, _, tokenizer = _load_tokenizer(data_path, model_config.seq_len, args.data_frac)
->>>>>>> codex/add-inference-method-for-trained-model-5xn1kp
+    _, _, tokenizer = _load_tokenizer(data_path, model_config.seq_len, 1.0, args.tokenizer)
 
     model = TransformerLM(model_config)
     model.load_state_dict(checkpoint["model"])
@@ -277,7 +248,7 @@ def _run_generation(args: argparse.Namespace) -> None:
 
     prompt_tokens = tokenizer.encode(args.prompt)
     if not prompt_tokens:
-        raise ValueError("Prompt must contain at least one known character to tokenize.")
+        raise ValueError("Prompt must contain at least one known token to tokenize.")
     prompt_tensor = torch.tensor([prompt_tokens], dtype=torch.long, device=device)
     with torch.no_grad():
         output = model.generate(prompt_tensor, args.max_new_tokens)
@@ -291,10 +262,9 @@ def main() -> None:
         _run_training(args)
     elif args.command == "generate":
         _run_generation(args)
-    else:  # pragma: no cover - safety catch for argparse
+    else:  # pragma: no cover
         raise ValueError(f"Unknown command: {args.command}")
 
 
 if __name__ == "__main__":
     main()
-
