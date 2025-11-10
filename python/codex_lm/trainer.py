@@ -57,7 +57,7 @@ class Trainer:
         self.config = config
         self.device = torch.device(config.device)
 
-        self.scaler = torch.cuda.amp.GradScaler(enabled=self.device.type == "cuda")
+        self.scaler = torch.amp.GradScaler("cuda", enabled=self.device.type == "cuda")
 
         if config.use_wandb and wandb is not None:
             wandb.init(project=config.wandb_project, name=config.wandb_run, config=config.__dict__)
@@ -83,7 +83,7 @@ class Trainer:
             self.optimizer.zero_grad(set_to_none=True)
             for _ in range(accum_steps):
                 batch = _prepare_batch(next(train_iter), device)
-                with torch.cuda.amp.autocast(enabled=device.type == "cuda"):
+                with torch.amp.autocast("cuda", enabled=device.type == "cuda"):
                     _, loss = model(batch.x, batch.y)
                 assert loss is not None
                 losses.append(loss.detach())

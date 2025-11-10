@@ -39,8 +39,9 @@ def rotary_emb(head_dim: int, seq_len: int, base: float, device: torch.device) -
 def apply_rotary(q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     q1, q2 = q[..., ::2], q[..., 1::2]
     k1, k2 = k[..., ::2], k[..., 1::2]
-    cos = cos.unsqueeze(1).unsqueeze(1)
-    sin = sin.unsqueeze(1).unsqueeze(1)
+    # Broadcast rotary frequencies to [batch, heads, seq, head_dim / 2]
+    cos = cos.unsqueeze(0).unsqueeze(0)
+    sin = sin.unsqueeze(0).unsqueeze(0)
     q_rot = torch.stack([q1 * cos - q2 * sin, q1 * sin + q2 * cos], dim=-1).reshape_as(q)
     k_rot = torch.stack([k1 * cos - k2 * sin, k1 * sin + k2 * cos], dim=-1).reshape_as(k)
     return q_rot, k_rot
