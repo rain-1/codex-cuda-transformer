@@ -13,7 +13,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 
 from .config import MODEL_PRESETS, ModelConfig
-from .data import Batch, cosine_warmup, cycle
+from .data import Batch, CharacterTokenizer, cosine_warmup, cycle
 from .model import TransformerLM
 
 try:  # Optional wandb logging
@@ -40,6 +40,9 @@ class TrainingConfig:
     wandb_project: str = "codex-transformer"
     wandb_run: Optional[str] = None
     override_model: Optional[ModelConfig] = None
+    sample_prompts: tuple[str, ...] = ()
+    sample_max_new_tokens: int = 200
+    sample_dir: Optional[pathlib.Path] = None
 
     def model_config(self) -> ModelConfig:
         return self.override_model or MODEL_PRESETS[self.model_name]
@@ -50,12 +53,20 @@ def _prepare_batch(batch: Batch, device: torch.device) -> Batch:
 
 
 class Trainer:
-    def __init__(self, model: TransformerLM, optimizer: torch.optim.Optimizer, scheduler: Optional[torch.optim.lr_scheduler.LambdaLR], config: TrainingConfig):
+    def __init__(
+        self,
+        model: TransformerLM,
+        optimizer: torch.optim.Optimizer,
+        scheduler: Optional[torch.optim.lr_scheduler.LambdaLR],
+        config: TrainingConfig,
+        tokenizer: Optional[CharacterTokenizer] = None,
+    ):
         self.model = model
         self.optimizer = optimizer
         self.scheduler = scheduler
         self.config = config
         self.device = torch.device(config.device)
+        self.tokenizer = tokenizer
 
         self.scaler = torch.amp.GradScaler("cuda", enabled=self.device.type == "cuda")
 
@@ -115,6 +126,7 @@ class Trainer:
                     wandb.log({"val/loss": val_loss, "val/perplexity": torch.exp(torch.tensor(val_loss)).item()}, step=step)
                 else:
                     print(f"val loss={val_loss:.4f} ppl={math.exp(val_loss):.2f}")
+                self._log_samples(step)
                 if val_loss < best_val:
                     best_val = val_loss
                     self._save_checkpoint("best.pt")
@@ -142,6 +154,44 @@ class Trainer:
         path = pathlib.Path("checkpoints")
         path.mkdir(exist_ok=True)
         torch.save({"model": self.model.state_dict(), "config": self.config.__dict__}, path / name)
+
+    def _log_samples(self, step: int) -> None:
+        if not self.config.sample_prompts or self.tokenizer is None:
+            return
+
+        sample_dir = self.config.sample_dir
+        if sample_dir is not None:
+            sample_dir.mkdir(parents=True, exist_ok=True)
+
+        was_training = self.model.training
+        self.model.eval()
+        outputs = []
+        with torch.no_grad():
+            for idx, prompt in enumerate(self.config.sample_prompts):
+                try:
+                    prompt_tokens = self.tokenizer.encode(prompt)
+                except KeyError as exc:
+                    print(f"[warning] skipping sample prompt {idx} due to unknown character: {exc}")
+                    continue
+                if not prompt_tokens:
+                    print(f"[warning] skipping empty prompt at index {idx}")
+                    continue
+                input_tensor = torch.tensor([prompt_tokens], dtype=torch.long, device=self.device)
+                generated = self.model.generate(input_tensor, self.config.sample_max_new_tokens)
+                text = self.tokenizer.decode(generated[0].tolist())
+                outputs.append((idx, prompt, text))
+                if self.config.use_wandb and wandb is not None:
+                    wandb.log({f"samples/{idx}": text}, step=step)
+                if sample_dir is not None:
+                    file_path = sample_dir / f"step_{step:06d}_sample_{idx}.txt"
+                    file_path.write_text(text, encoding="utf-8")
+
+        if was_training:
+            self.model.train()
+
+        for idx, prompt, text in outputs:
+            separator = "-" * 80
+            print(f"sample[{idx}] @ step {step}\nprompt: {prompt}\n{separator}\n{text}\n{separator}")
 
 
 def create_optimizer(model: nn.Module, config: TrainingConfig) -> torch.optim.Optimizer:
