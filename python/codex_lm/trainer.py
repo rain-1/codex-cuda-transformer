@@ -49,7 +49,10 @@ class TrainingConfig:
 
 
 def _prepare_batch(batch: Batch, device: torch.device) -> Batch:
-    return Batch(batch.x.to(device), batch.y.to(device))
+    return Batch(
+        batch.x.to(device=device, dtype=torch.long),
+        batch.y.to(device=device, dtype=torch.long),
+    )
 
 
 class Trainer:
