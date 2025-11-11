@@ -19,6 +19,7 @@ from codex_lm.data import (
     download_text,
     download_tinystories,
 )
+from codex_lm.dtypes import DTYPE_CHOICES, resolve_dtype
 from codex_lm.memory import MemoryAnalyzer
 from codex_lm.model import TransformerLM
 from codex_lm.trainer import TrainingConfig, Trainer, create_optimizer, create_scheduler
@@ -113,6 +114,12 @@ def parse_args() -> argparse.Namespace:
     train_parser.add_argument("--eval-iters", type=int, default=10)
     train_parser.add_argument("--grad-clip", type=float, default=1.0)
     train_parser.add_argument("--device", type=str, default=_default_device())
+    train_parser.add_argument(
+        "--dtype",
+        choices=DTYPE_CHOICES,
+        default="float32",
+        help="Computation precision for the forward pass (weights remain float32).",
+    )
     train_parser.add_argument("--compile", action="store_true")
     train_parser.add_argument("--wandb", action="store_true", help="Enable Weights & Biases logging")
     train_parser.add_argument("--wandb-project", type=str, default="codex-transformer")
@@ -177,7 +184,7 @@ def parse_args() -> argparse.Namespace:
     )
     analyze_parser.add_argument(
         "--dtype",
-        choices=["float32", "float16", "bfloat16"],
+        choices=DTYPE_CHOICES,
         default="float16",
         help="Precision to cast the model parameters to during profiling.",
     )
@@ -242,6 +249,10 @@ def _maybe_adjust_config(config: ModelConfig, tokenizer: CharacterTokenizer) -> 
 
 def _run_training(args: argparse.Namespace) -> None:
     preset_config = MODEL_PRESETS[args.model]
+    device = torch.device(args.device)
+    dtype = resolve_dtype(args.dtype)
+    if device.type != "cuda" and dtype in (torch.float16, torch.bfloat16):
+        raise ValueError("--dtype float16/bfloat16 requires a CUDA device.")
     data_path = _resolve_dataset(args.data, args.data_path)
     train_dataset, val_dataset, tokenizer = _load_tokenizer(data_path, preset_config.seq_len, args.data_frac)
     model_config = _maybe_adjust_config(preset_config, tokenizer)
@@ -273,6 +284,7 @@ def _run_training(args: argparse.Namespace) -> None:
         eval_iters=args.eval_iters,
         grad_clip=args.grad_clip,
         device=args.device,
+        dtype=args.dtype,
         compile=args.compile,
         use_wandb=args.wandb,
         wandb_project=args.wandb_project,
@@ -325,12 +337,7 @@ def _run_memory_analysis(args: argparse.Namespace) -> None:
     if device.type != "cuda":
         raise RuntimeError("Memory analysis requires a CUDA device.")
 
-    dtype_map = {
-        "float32": torch.float32,
-        "float16": torch.float16,
-        "bfloat16": torch.bfloat16,
-    }
-    dtype = dtype_map[args.dtype]
+    dtype = resolve_dtype(args.dtype)
 
     preset_config = MODEL_PRESETS[args.model]
     config = preset_config
