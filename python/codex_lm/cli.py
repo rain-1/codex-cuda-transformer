@@ -142,6 +142,17 @@ def parse_args() -> argparse.Namespace:
     train_parser.add_argument("--eval-interval", type=int, default=100)
     train_parser.add_argument("--eval-iters", type=int, default=10)
     train_parser.add_argument("--grad-clip", type=float, default=1.0)
+    train_parser.add_argument(
+        "--gradient-accumulation-steps",
+        type=int,
+        default=None,
+        help="Override the number of gradient accumulation steps (defaults to batch_size/micro_batch_size).",
+    )
+    train_parser.add_argument(
+        "--gradient-checkpointing",
+        action="store_true",
+        help="Enable gradient checkpointing to trade extra compute for lower activation memory.",
+    )
     train_parser.add_argument("--device", type=str, default=_default_device())
     train_parser.add_argument(
         "--dtype",
@@ -170,6 +181,19 @@ def parse_args() -> argparse.Namespace:
         type=pathlib.Path,
         default=None,
         help="Optional directory to store decoded samples from evaluation.",
+    )
+    train_parser.set_defaults(print_samples=False)
+    train_parser.add_argument(
+        "--print-samples",
+        dest="print_samples",
+        action="store_true",
+        help="Print generated samples to stdout during evaluation steps.",
+    )
+    train_parser.add_argument(
+        "--no-print-samples",
+        dest="print_samples",
+        action="store_false",
+        help="Disable printing generated samples to stdout during evaluation steps.",
     )
 
     generate_parser = subparsers.add_parser("generate", help="Run inference with a saved checkpoint")
@@ -295,6 +319,16 @@ def _run_training(args: argparse.Namespace) -> None:
     )
     model_config = _maybe_adjust_config(preset_config, tokenizer)
 
+    if args.sample_prompt:
+        sample_prompts = tuple(args.sample_prompt)
+    else:
+        sample_prompts = DEFAULT_SAMPLE_PROMPTS.get(args.data, FALLBACK_SAMPLE_PROMPTS)
+        prompt_preview = ", ".join(repr(prompt) for prompt in sample_prompts)
+        print(f"[info] using default sample prompts for {args.data}: {prompt_preview}")
+
+    if args.gradient_accumulation_steps is not None and args.gradient_accumulation_steps <= 0:
+        raise ValueError("--gradient-accumulation-steps must be a positive integer when provided")
+
     train_loader = DataLoader(
         train_dataset,
         batch_size=args.micro_batch_size,
@@ -328,6 +362,8 @@ def _run_training(args: argparse.Namespace) -> None:
         eval_interval=args.eval_interval,
         eval_iters=args.eval_iters,
         grad_clip=args.grad_clip,
+        gradient_accumulation_steps=args.gradient_accumulation_steps,
+        gradient_checkpointing=args.gradient_checkpointing,
         device=args.device,
         dtype=args.dtype,
         compile=args.compile,
@@ -339,9 +375,12 @@ def _run_training(args: argparse.Namespace) -> None:
         sample_max_new_tokens=args.sample_max_new_tokens,
         sample_dir=args.sample_dir,
         tokenizer=tokenizer_choice,
+        print_samples=args.print_samples,
     )
 
-    model = TransformerLM(train_config.model_config())
+    model = TransformerLM(
+        train_config.model_config(), gradient_checkpointing=train_config.gradient_checkpointing
+    )
     optimizer = create_optimizer(model, train_config)
     scheduler = create_scheduler(optimizer, train_config)
     trainer = Trainer(model, optimizer, scheduler, train_config, tokenizer=tokenizer)
@@ -390,6 +429,7 @@ def _run_generation(args: argparse.Namespace) -> None:
         output = model.generate(prompt_tensor, args.max_new_tokens)
     decoded = tokenizer.decode(output[0].tolist())
     print(decoded)
+
 
 
 def _run_info(args: argparse.Namespace) -> None:

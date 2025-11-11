@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Optional, Tuple
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
 
 from .config import ModelConfig
 
@@ -157,9 +158,10 @@ class TransformerBlock(nn.Module):
 
 
 class TransformerLM(nn.Module):
-    def __init__(self, config: ModelConfig):
+    def __init__(self, config: ModelConfig, *, gradient_checkpointing: bool = False):
         super().__init__()
         self.config = config
+        self.gradient_checkpointing = gradient_checkpointing
         self.token_emb = nn.Embedding(config.vocab_size, config.d_model)
         self.blocks = nn.ModuleList([TransformerBlock(config) for _ in range(config.n_layers)])
         self.norm = RMSNorm(config.d_model)
@@ -194,6 +196,31 @@ class TransformerLM(nn.Module):
                     memory_analyzer=memory_analyzer,
                     block_label=label,
                 )
+            if self.gradient_checkpointing and self.training:
+
+                def block_forward(inp: torch.Tensor) -> torch.Tensor:
+                    with _memory_section(memory_analyzer, label):
+                        return block(
+                            inp,
+                            cos,
+                            sin,
+                            memory_analyzer=memory_analyzer,
+                            block_label=label,
+                        )
+
+                try:
+                    x = checkpoint(block_forward, x, use_reentrant=False)
+                except TypeError:  # pragma: no cover - older PyTorch fallback
+                    x = checkpoint(block_forward, x)
+            else:
+                with _memory_section(memory_analyzer, label):
+                    x = block(
+                        x,
+                        cos,
+                        sin,
+                        memory_analyzer=memory_analyzer,
+                        block_label=label,
+                    )
         with _memory_section(memory_analyzer, "final_norm"):
             x = self.norm(x)
         with _memory_section(memory_analyzer, "lm_head"):

@@ -49,7 +49,7 @@ If you only need a smaller subset of a large corpus (to reduce RAM or download t
 python -m codex_lm train pico tinystories --data-frac 0.1 --steps 2000 --wandb
 ```
 
-By default the script downloads the Tiny Shakespeare dataset and uses a character-level tokenizer. Use `--data custom --data-path /path/to/text.txt` to point at another corpus. Mixed precision, gradient accumulation, cosine scheduling, and optional `torch.compile` support are built in. Enable Weights & Biases logging with `--wandb` and optionally customize the project/run name via `--wandb-project` and `--wandb-run`.
+By default the script downloads the Tiny Shakespeare dataset and uses a character-level tokenizer. Use `--data custom --data-path /path/to/text.txt` to point at another corpus. Mixed precision, configurable gradient accumulation (`--gradient-accumulation-steps`), gradient checkpointing (`--gradient-checkpointing`), cosine scheduling, and optional `torch.compile` support are built in. Enable Weights & Biases logging with `--wandb` and optionally customize the project/run name via `--wandb-project` and `--wandb-run`.
 
 ## C++/CUDA training
 

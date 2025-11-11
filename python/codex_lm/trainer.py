@@ -37,6 +37,8 @@ class TrainingConfig:
     eval_interval: int
     eval_iters: int
     grad_clip: float
+    gradient_accumulation_steps: Optional[int] = None
+    gradient_checkpointing: bool = False
     device: str = "cuda"
     dtype: str = "float32"
     compile: bool = False
@@ -48,6 +50,7 @@ class TrainingConfig:
     sample_max_new_tokens: int = 200
     sample_dir: Optional[pathlib.Path] = None
     tokenizer: str = "char"
+    print_samples: bool = False
 
     def model_config(self) -> ModelConfig:
         return self.override_model or MODEL_PRESETS[self.model_name]
@@ -77,10 +80,13 @@ class Trainer:
         self.dtype = resolve_dtype(config.dtype)
         self.tokenizer = tokenizer
 
+        if hasattr(self.model, "gradient_checkpointing"):
+            self.model.gradient_checkpointing = config.gradient_checkpointing  # type: ignore[attr-defined]
+
         use_grad_scaler = self.device.type == "cuda" and self.dtype == torch.float16
         self.scaler = torch.amp.GradScaler("cuda", enabled=use_grad_scaler)
 
-        self._wandb_samples_table = None
+        self._wandb_table_columns = ["step", "sample", "prompt", "completion"]
         if config.use_wandb and wandb is not None:
             wandb.init(project=config.wandb_project, name=config.wandb_run, config=config.__dict__)
             self._wandb_samples_table = wandb.Table(columns=["step", "sample", "prompt", "completion"])
@@ -94,11 +100,18 @@ class Trainer:
         self.model.to(device=device)
         if self.config.compile:
             self.model = torch.compile(self.model)
+        if hasattr(self.model, "gradient_checkpointing"):
+            self.model.gradient_checkpointing = self.config.gradient_checkpointing  # type: ignore[attr-defined]
         model = self.model
 
         model.train()
         train_iter: Iterator[Batch] = cycle(train_loader)
-        accum_steps = max(1, self.config.batch_size // self.config.micro_batch_size)
+        accum_steps = (
+            self.config.gradient_accumulation_steps
+            if self.config.gradient_accumulation_steps is not None
+            else self.config.batch_size // self.config.micro_batch_size
+        )
+        accum_steps = max(1, accum_steps)
         best_val = float("inf")
         for step in range(1, self.config.num_steps + 1):
             start = time.time()
@@ -186,9 +199,9 @@ class Trainer:
 
         was_training = self.model.training
         self.model.eval()
-        outputs = []
+        outputs: list[tuple[int, str, str]] = []
+        table_rows: list[list[Any]] = []
         wandb_payload: Dict[str, Any] = {}
-        wandb_rows_added = False
         with torch.no_grad():
             for idx, prompt in enumerate(self.config.sample_prompts):
                 try:
@@ -209,9 +222,7 @@ class Trainer:
                     wandb_payload[f"samples/{idx}"] = wandb.Html(
                         f"<div><h4>Prompt</h4><pre>{html_prompt}</pre><h4>Completion</h4><pre>{html_text}</pre></div>"
                     )
-                    if self._wandb_samples_table is not None:
-                        self._wandb_samples_table.add_data(step, idx, prompt, text)
-                        wandb_rows_added = True
+                    table_rows.append([step, idx, prompt, text])
                 if sample_dir is not None:
                     file_path = sample_dir / f"step_{step:06d}_sample_{idx}.txt"
                     file_path.write_text(text, encoding="utf-8")
@@ -219,12 +230,21 @@ class Trainer:
         if was_training:
             self.model.train()
 
-        if wandb_rows_added and self.config.use_wandb and wandb is not None and self._wandb_samples_table is not None:
-            wandb_payload["eval/samples"] = self._wandb_samples_table
+        if table_rows and self.config.use_wandb and wandb is not None:
+            samples_table = wandb.Table(columns=self._wandb_table_columns, data=table_rows)
+            wandb_payload["eval/samples"] = samples_table
 
-        for idx, prompt, text in outputs:
-            separator = "-" * 80
-            print(f"sample[{idx}] @ step {step}\nprompt: {prompt}\n{separator}\n{text}\n{separator}")
+        if self.config.print_samples:
+            for idx, prompt, text in outputs:
+                separator = "-" * 80
+                print(f"sample[{idx}] @ step {step}\nprompt: {prompt}\n{separator}\n{text}\n{separator}")
+
+        return wandb_payload
+
+    def _autocast_context(self):
+        if self.device.type == "cuda" and self.dtype in (torch.float16, torch.bfloat16):
+            return torch.amp.autocast("cuda", dtype=self.dtype)
+        return nullcontext()
 
         return wandb_payload
 
