@@ -10,7 +10,7 @@ Three presets expose progressively larger configurations while keeping the archi
 |------|----------------------|--------|-----------|-------|---------|---------|
 | `pico` | ~5M | 6 | 256 | 8 | 1024 | 256 |
 | `nano` | ~50M | 12 | 512 | 8 | 2048 | 512 |
-| `micro` | ~500M | 24 | 1024 | 16 | 8192 | 1024 |
+| `micro` | ~200M | 16 | 640 | 16 | 3328 | 1024 |
 
 Each preset can adjust the vocabulary size automatically to match the dataset tokenization.
 
