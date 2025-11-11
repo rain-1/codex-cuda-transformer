@@ -8,7 +8,8 @@ train-pico:
 		--eval-interval 1 --eval-iters 1 \
 		--device cuda \
 		--wandb --wandb-project codex-transformer --wandb-run make-train-pico \
-		--dtype float16 pico tinyshakespeare
+		--dtype float16 \
+		pico tinyshakespeare
 
 test-pico:
 	python -m codex_lm generate \
