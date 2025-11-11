@@ -182,6 +182,19 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Optional directory to store decoded samples from evaluation.",
     )
+    train_parser.set_defaults(print_samples=False)
+    train_parser.add_argument(
+        "--print-samples",
+        dest="print_samples",
+        action="store_true",
+        help="Print generated samples to stdout during evaluation steps.",
+    )
+    train_parser.add_argument(
+        "--no-print-samples",
+        dest="print_samples",
+        action="store_false",
+        help="Disable printing generated samples to stdout during evaluation steps.",
+    )
 
     generate_parser = subparsers.add_parser("generate", help="Run inference with a saved checkpoint")
     generate_parser.add_argument(
@@ -356,6 +369,7 @@ def _run_training(args: argparse.Namespace) -> None:
         sample_max_new_tokens=args.sample_max_new_tokens,
         sample_dir=args.sample_dir,
         tokenizer=tokenizer_choice,
+        print_samples=args.print_samples,
     )
 
     model = TransformerLM(

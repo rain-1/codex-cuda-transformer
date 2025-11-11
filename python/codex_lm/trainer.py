@@ -50,6 +50,7 @@ class TrainingConfig:
     sample_max_new_tokens: int = 200
     sample_dir: Optional[pathlib.Path] = None
     tokenizer: str = "char"
+    print_samples: bool = False
 
     def model_config(self) -> ModelConfig:
         return self.override_model or MODEL_PRESETS[self.model_name]
@@ -85,10 +86,9 @@ class Trainer:
         use_grad_scaler = self.device.type == "cuda" and self.dtype == torch.float16
         self.scaler = torch.amp.GradScaler("cuda", enabled=use_grad_scaler)
 
-        self._wandb_samples_table = None
+        self._wandb_table_columns = ["step", "sample", "prompt", "completion"]
         if config.use_wandb and wandb is not None:
             wandb.init(project=config.wandb_project, name=config.wandb_run, config=config.__dict__)
-            self._wandb_samples_table = wandb.Table(columns=["step", "sample", "prompt", "completion"])
 
     def train(
         self,
@@ -198,9 +198,9 @@ class Trainer:
 
         was_training = self.model.training
         self.model.eval()
-        outputs = []
+        outputs: list[tuple[int, str, str]] = []
+        table_rows: list[list[Any]] = []
         wandb_payload: Dict[str, Any] = {}
-        wandb_rows_added = False
         with torch.no_grad():
             for idx, prompt in enumerate(self.config.sample_prompts):
                 try:
@@ -221,9 +221,7 @@ class Trainer:
                     wandb_payload[f"samples/{idx}"] = wandb.Html(
                         f"<div><h4>Prompt</h4><pre>{html_prompt}</pre><h4>Completion</h4><pre>{html_text}</pre></div>"
                     )
-                    if self._wandb_samples_table is not None:
-                        self._wandb_samples_table.add_data(step, idx, prompt, text)
-                        wandb_rows_added = True
+                    table_rows.append([step, idx, prompt, text])
                 if sample_dir is not None:
                     file_path = sample_dir / f"step_{step:06d}_sample_{idx}.txt"
                     file_path.write_text(text, encoding="utf-8")
@@ -231,12 +229,14 @@ class Trainer:
         if was_training:
             self.model.train()
 
-        if wandb_rows_added and self.config.use_wandb and wandb is not None and self._wandb_samples_table is not None:
-            wandb_payload["eval/samples"] = self._wandb_samples_table
+        if table_rows and self.config.use_wandb and wandb is not None:
+            samples_table = wandb.Table(columns=self._wandb_table_columns, data=table_rows)
+            wandb_payload["eval/samples"] = samples_table
 
-        for idx, prompt, text in outputs:
-            separator = "-" * 80
-            print(f"sample[{idx}] @ step {step}\nprompt: {prompt}\n{separator}\n{text}\n{separator}")
+        if self.config.print_samples:
+            for idx, prompt, text in outputs:
+                separator = "-" * 80
+                print(f"sample[{idx}] @ step {step}\nprompt: {prompt}\n{separator}\n{text}\n{separator}")
 
         return wandb_payload
 

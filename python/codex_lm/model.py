@@ -200,7 +200,10 @@ class TransformerLM(nn.Module):
                             block_label=label,
                         )
 
-                x = checkpoint(block_forward, x)
+                try:
+                    x = checkpoint(block_forward, x, use_reentrant=False)
+                except TypeError:  # pragma: no cover - older PyTorch fallback
+                    x = checkpoint(block_forward, x)
             else:
                 with _memory_section(memory_analyzer, label):
                     x = block(
