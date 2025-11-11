@@ -47,10 +47,10 @@ MODEL_PRESETS: Dict[str, ModelConfig] = {
     "micro": ModelConfig(
         vocab_size=4096,
         seq_len=1024,
-        d_model=1024,
-        n_layers=24,
+        d_model=640,
+        n_layers=16,
         n_heads=16,
-        d_ff=8192,
+        d_ff=3328,
         dropout=0.1,
     ),
 }

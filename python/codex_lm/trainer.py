@@ -1,10 +1,12 @@
 """Training utilities for the Codex Transformer."""
 from __future__ import annotations
 
+import html
 import math
 import time
+from contextlib import nullcontext
 from dataclasses import dataclass
-from typing import Iterator, Optional
+from typing import Any, Dict, Iterator, Optional
 
 import pathlib
 
@@ -13,7 +15,8 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 
 from .config import MODEL_PRESETS, ModelConfig
-from .data import Batch, CharacterTokenizer, cosine_warmup, cycle
+from .data import Batch, Tokenizer, cosine_warmup, cycle
+from .dtypes import resolve_dtype
 from .model import TransformerLM
 
 try:  # Optional wandb logging
@@ -37,6 +40,7 @@ class TrainingConfig:
     gradient_accumulation_steps: Optional[int] = None
     gradient_checkpointing: bool = False
     device: str = "cuda"
+    dtype: str = "float32"
     compile: bool = False
     use_wandb: bool = False
     wandb_project: str = "codex-transformer"
@@ -45,6 +49,7 @@ class TrainingConfig:
     sample_prompts: tuple[str, ...] = ()
     sample_max_new_tokens: int = 200
     sample_dir: Optional[pathlib.Path] = None
+    tokenizer: str = "char"
 
     def model_config(self) -> ModelConfig:
         return self.override_model or MODEL_PRESETS[self.model_name]
@@ -64,22 +69,26 @@ class Trainer:
         optimizer: torch.optim.Optimizer,
         scheduler: Optional[torch.optim.lr_scheduler.LambdaLR],
         config: TrainingConfig,
-        tokenizer: Optional[CharacterTokenizer] = None,
+        tokenizer: Optional[Tokenizer] = None,
     ):
         self.model = model
         self.optimizer = optimizer
         self.scheduler = scheduler
         self.config = config
         self.device = torch.device(config.device)
+        self.dtype = resolve_dtype(config.dtype)
         self.tokenizer = tokenizer
 
         if hasattr(self.model, "gradient_checkpointing"):
             self.model.gradient_checkpointing = config.gradient_checkpointing  # type: ignore[attr-defined]
 
-        self.scaler = torch.amp.GradScaler("cuda", enabled=self.device.type == "cuda")
+        use_grad_scaler = self.device.type == "cuda" and self.dtype == torch.float16
+        self.scaler = torch.amp.GradScaler("cuda", enabled=use_grad_scaler)
 
+        self._wandb_samples_table = None
         if config.use_wandb and wandb is not None:
             wandb.init(project=config.wandb_project, name=config.wandb_run, config=config.__dict__)
+            self._wandb_samples_table = wandb.Table(columns=["step", "sample", "prompt", "completion"])
 
     def train(
         self,
@@ -87,9 +96,11 @@ class Trainer:
         val_loader: DataLoader[Batch],
     ) -> None:
         device = self.device
-        self.model.to(device)
+        self.model.to(device=device)
         if self.config.compile:
             self.model = torch.compile(self.model)
+        if hasattr(self.model, "gradient_checkpointing"):
+            self.model.gradient_checkpointing = self.config.gradient_checkpointing  # type: ignore[attr-defined]
         model = self.model
 
         model.train()
@@ -107,7 +118,7 @@ class Trainer:
             self.optimizer.zero_grad(set_to_none=True)
             for _ in range(accum_steps):
                 batch = _prepare_batch(next(train_iter), device)
-                with torch.amp.autocast("cuda", enabled=device.type == "cuda"):
+                with self._autocast_context():
                     _, loss = model(batch.x, batch.y)
                 assert loss is not None
                 losses.append(loss.detach())
@@ -129,17 +140,25 @@ class Trainer:
                 "step_time": step_time,
             }
             if self.config.use_wandb and wandb is not None:
-                wandb.log(log_data)
+                commit_now = True
+                if self.config.eval_interval > 0 and step % self.config.eval_interval == 0:
+                    commit_now = False
+                wandb.log(log_data, step=step, commit=commit_now)
             else:
                 print(f"step {step:06d} loss={loss_val:.4f} lr={log_data['lr']:.3e} time={step_time:.2f}s")
 
             if step % self.config.eval_interval == 0:
                 val_loss = self.evaluate(val_loader)
+                sample_logs = self._log_samples(step)
                 if self.config.use_wandb and wandb is not None:
-                    wandb.log({"val/loss": val_loss, "val/perplexity": torch.exp(torch.tensor(val_loss)).item()}, step=step)
+                    log_payload: Dict[str, Any] = {
+                        "val/loss": val_loss,
+                        "val/perplexity": torch.exp(torch.tensor(val_loss)).item(),
+                    }
+                    log_payload.update(sample_logs)
+                    wandb.log(log_payload, step=step)
                 else:
                     print(f"val loss={val_loss:.4f} ppl={math.exp(val_loss):.2f}")
-                self._log_samples(step)
                 if val_loss < best_val:
                     best_val = val_loss
                     self._save_checkpoint("best.pt")
@@ -157,7 +176,8 @@ class Trainer:
                     iterator = iter(loader)
                     raw_batch = next(iterator)
                 batch = _prepare_batch(raw_batch, self.device)
-                _, loss = self.model(batch.x, batch.y)
+                with self._autocast_context():
+                    _, loss = self.model(batch.x, batch.y)
                 assert loss is not None
                 losses.append(loss.item())
         self.model.train()
@@ -168,9 +188,9 @@ class Trainer:
         path.mkdir(exist_ok=True)
         torch.save({"model": self.model.state_dict(), "config": self.config.__dict__}, path / name)
 
-    def _log_samples(self, step: int) -> None:
+    def _log_samples(self, step: int) -> Dict[str, Any]:
         if not self.config.sample_prompts or self.tokenizer is None:
-            return
+            return {}
 
         sample_dir = self.config.sample_dir
         if sample_dir is not None:
@@ -179,6 +199,8 @@ class Trainer:
         was_training = self.model.training
         self.model.eval()
         outputs = []
+        wandb_payload: Dict[str, Any] = {}
+        wandb_rows_added = False
         with torch.no_grad():
             for idx, prompt in enumerate(self.config.sample_prompts):
                 try:
@@ -194,7 +216,14 @@ class Trainer:
                 text = self.tokenizer.decode(generated[0].tolist())
                 outputs.append((idx, prompt, text))
                 if self.config.use_wandb and wandb is not None:
-                    wandb.log({f"samples/{idx}": text}, step=step)
+                    html_prompt = html.escape(prompt)
+                    html_text = html.escape(text)
+                    wandb_payload[f"samples/{idx}"] = wandb.Html(
+                        f"<div><h4>Prompt</h4><pre>{html_prompt}</pre><h4>Completion</h4><pre>{html_text}</pre></div>"
+                    )
+                    if self._wandb_samples_table is not None:
+                        self._wandb_samples_table.add_data(step, idx, prompt, text)
+                        wandb_rows_added = True
                 if sample_dir is not None:
                     file_path = sample_dir / f"step_{step:06d}_sample_{idx}.txt"
                     file_path.write_text(text, encoding="utf-8")
@@ -202,9 +231,19 @@ class Trainer:
         if was_training:
             self.model.train()
 
+        if wandb_rows_added and self.config.use_wandb and wandb is not None and self._wandb_samples_table is not None:
+            wandb_payload["eval/samples"] = self._wandb_samples_table
+
         for idx, prompt, text in outputs:
             separator = "-" * 80
             print(f"sample[{idx}] @ step {step}\nprompt: {prompt}\n{separator}\n{text}\n{separator}")
+
+        return wandb_payload
+
+    def _autocast_context(self):
+        if self.device.type == "cuda" and self.dtype in (torch.float16, torch.bfloat16):
+            return torch.amp.autocast("cuda", dtype=self.dtype)
+        return nullcontext()
 
 
 def create_optimizer(model: nn.Module, config: TrainingConfig) -> torch.optim.Optimizer:

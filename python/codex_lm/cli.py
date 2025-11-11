@@ -13,12 +13,13 @@ from torch.utils.data import DataLoader, Dataset
 
 from codex_lm.config import MODEL_PRESETS, ModelConfig
 from codex_lm.data import (
-    CharacterTokenizer,
+    Tokenizer,
     build_dataset,
     collate_batch,
     download_text,
     download_tinystories,
 )
+from codex_lm.dtypes import DTYPE_CHOICES, resolve_dtype
 from codex_lm.memory import MemoryAnalyzer
 from codex_lm.model import TransformerLM
 from codex_lm.trainer import TrainingConfig, Trainer, create_optimizer, create_scheduler
@@ -33,14 +34,42 @@ def _default_device() -> str:
     return "cuda" if torch.cuda.is_available() else "cpu"
 
 
-def _add_data_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("data", choices=["tinyshakespeare", "tinystories", "custom"], help="Dataset choice")
+DATASET_CHOICES = ("tinyshakespeare", "tinystories", "custom")
+
+DEFAULT_SAMPLE_PROMPTS: dict[str, tuple[str, ...]] = {
+    "tinyshakespeare": (
+        "ROMEO: ",
+        "HAMLET: ",
+    ),
+    "tinystories": (
+        "Once upon a time",
+        "The robot ",
+    ),
+}
+
+FALLBACK_SAMPLE_PROMPTS: tuple[str, ...] = ("Once upon a time",)
+
+
+def _add_data_args(
+    parser: argparse.ArgumentParser,
+    *,
+    include_positional: bool = True,
+    default_tokenizer: str | None = "char",
+) -> None:
+    if include_positional:
+        parser.add_argument("data", choices=DATASET_CHOICES, help="Dataset choice")
     parser.add_argument("--data-path", type=pathlib.Path, default=None, help="Path to custom dataset")
     parser.add_argument(
         "--data-frac",
         type=float,
         default=1.0,
         help="Fraction of the dataset to keep (0 < frac <= 1).",
+    )
+    parser.add_argument(
+        "--tokenizer",
+        choices=["char", "word"],
+        default=default_tokenizer,
+        help="Tokenizer granularity (character or word/punctuation).",
     )
 
 
@@ -57,8 +86,13 @@ def _resolve_dataset(choice: str, data_path: pathlib.Path | None) -> pathlib.Pat
     return data_path
 
 
-def _load_tokenizer(path: pathlib.Path, seq_len: int, fraction: float) -> tuple[Dataset, Dataset, CharacterTokenizer]:
-    return build_dataset(path, seq_len, fraction=fraction)
+def _load_tokenizer(
+    path: pathlib.Path,
+    seq_len: int,
+    fraction: float,
+    tokenizer_kind: str,
+) -> tuple[Dataset, Dataset, Tokenizer]:
+    return build_dataset(path, seq_len, fraction=fraction, tokenizer=tokenizer_kind)  # type: ignore[arg-type]
 
 
 def _coerce_model_config(config: Any) -> ModelConfig:
@@ -120,6 +154,12 @@ def parse_args() -> argparse.Namespace:
         help="Enable gradient checkpointing to trade extra compute for lower activation memory.",
     )
     train_parser.add_argument("--device", type=str, default=_default_device())
+    train_parser.add_argument(
+        "--dtype",
+        choices=DTYPE_CHOICES,
+        default="float32",
+        help="Computation precision for the forward pass (weights remain float32).",
+    )
     train_parser.add_argument("--compile", action="store_true")
     train_parser.add_argument("--wandb", action="store_true", help="Enable Weights & Biases logging")
     train_parser.add_argument("--wandb-project", type=str, default="codex-transformer")
@@ -144,8 +184,16 @@ def parse_args() -> argparse.Namespace:
     )
 
     generate_parser = subparsers.add_parser("generate", help="Run inference with a saved checkpoint")
-    generate_parser.add_argument("checkpoint", type=pathlib.Path, help="Path to the saved model checkpoint")
-    _add_data_args(generate_parser)
+    generate_parser.add_argument(
+        "generate_args",
+        nargs=2,
+        metavar=("checkpoint", "data"),
+        help=(
+            "Checkpoint path and dataset choice (tinyshakespeare, tinystories, or custom). The order "
+            "of these two arguments is flexible for backwards compatibility."
+        ),
+    )
+    _add_data_args(generate_parser, include_positional=False, default_tokenizer=None)
     generate_parser.add_argument("--prompt", type=str, required=True, help="Prompt text used to start generation")
     generate_parser.add_argument(
         "--max-new-tokens",
@@ -154,6 +202,9 @@ def parse_args() -> argparse.Namespace:
         help="Number of new tokens to sample from the model.",
     )
     generate_parser.add_argument("--device", type=str, default=_default_device())
+
+    info_parser = subparsers.add_parser("info", help="Print information about a model preset")
+    info_parser.add_argument("model", choices=MODEL_PRESETS.keys(), help="Model size preset")
 
     analyze_parser = subparsers.add_parser(
         "analyze-memory", help="Profile CUDA memory usage for a model forward pass"
@@ -176,7 +227,7 @@ def parse_args() -> argparse.Namespace:
     )
     analyze_parser.add_argument(
         "--dtype",
-        choices=["float32", "float16", "bfloat16"],
+        choices=DTYPE_CHOICES,
         default="float16",
         help="Precision to cast the model parameters to during profiling.",
     )
@@ -192,10 +243,36 @@ def parse_args() -> argparse.Namespace:
         help="Skip the backward() call when profiling (forward pass only).",
     )
 
-    return parser.parse_args()
+    args = parser.parse_args()
+
+    if args.command == "generate":
+        first, second = args.generate_args
+        dataset_options = set(DATASET_CHOICES)
+
+        if first in dataset_options and second in dataset_options:
+            parser.error(
+                "Provide exactly one dataset choice and one checkpoint path when using the generate command."
+            )
+
+        if first in dataset_options:
+            data_choice = first
+            checkpoint_str = second
+        elif second in dataset_options:
+            data_choice = second
+            checkpoint_str = first
+        else:
+            parser.error(
+                "Could not determine the dataset choice. Expected one of tinyshakespeare, tinystories, or custom."
+            )
+
+        args.checkpoint = pathlib.Path(checkpoint_str)
+        args.data = data_choice
+        delattr(args, "generate_args")
+
+    return args
 
 
-def _maybe_adjust_config(config: ModelConfig, tokenizer: CharacterTokenizer) -> ModelConfig:
+def _maybe_adjust_config(config: ModelConfig, tokenizer: Tokenizer) -> ModelConfig:
     if tokenizer.vocab_size == config.vocab_size:
         return config
     print(
@@ -215,9 +292,29 @@ def _maybe_adjust_config(config: ModelConfig, tokenizer: CharacterTokenizer) -> 
 
 def _run_training(args: argparse.Namespace) -> None:
     preset_config = MODEL_PRESETS[args.model]
+    device = torch.device(args.device)
+    dtype = resolve_dtype(args.dtype)
+    if device.type != "cuda" and dtype in (torch.float16, torch.bfloat16):
+        raise ValueError("--dtype float16/bfloat16 requires a CUDA device.")
+    tokenizer_choice = args.tokenizer or "char"
     data_path = _resolve_dataset(args.data, args.data_path)
-    train_dataset, val_dataset, tokenizer = _load_tokenizer(data_path, preset_config.seq_len, args.data_frac)
+    train_dataset, val_dataset, tokenizer = _load_tokenizer(
+        data_path,
+        preset_config.seq_len,
+        args.data_frac,
+        tokenizer_choice,
+    )
     model_config = _maybe_adjust_config(preset_config, tokenizer)
+
+    if args.sample_prompt:
+        sample_prompts = tuple(args.sample_prompt)
+    else:
+        sample_prompts = DEFAULT_SAMPLE_PROMPTS.get(args.data, FALLBACK_SAMPLE_PROMPTS)
+        prompt_preview = ", ".join(repr(prompt) for prompt in sample_prompts)
+        print(f"[info] using default sample prompts for {args.data}: {prompt_preview}")
+
+    if args.gradient_accumulation_steps is not None and args.gradient_accumulation_steps <= 0:
+        raise ValueError("--gradient-accumulation-steps must be a positive integer when provided")
 
     train_loader = DataLoader(
         train_dataset,
@@ -234,8 +331,6 @@ def _run_training(args: argparse.Namespace) -> None:
         collate_fn=collate_batch,
     )
 
-    if args.gradient_accumulation_steps is not None and args.gradient_accumulation_steps <= 0:
-        raise ValueError("--gradient-accumulation-steps must be a positive integer when provided")
 
     train_config = TrainingConfig(
         model_name=args.model,
@@ -251,14 +346,16 @@ def _run_training(args: argparse.Namespace) -> None:
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         gradient_checkpointing=args.gradient_checkpointing,
         device=args.device,
+        dtype=args.dtype,
         compile=args.compile,
         use_wandb=args.wandb,
         wandb_project=args.wandb_project,
         wandb_run=args.wandb_run,
         override_model=model_config,
-        sample_prompts=tuple(args.sample_prompt),
+        sample_prompts=sample_prompts,
         sample_max_new_tokens=args.sample_max_new_tokens,
         sample_dir=args.sample_dir,
+        tokenizer=tokenizer_choice,
     )
 
     model = TransformerLM(
@@ -280,8 +377,23 @@ def _run_generation(args: argparse.Namespace) -> None:
         model_name = config_dict["model_name"]
         model_config = MODEL_PRESETS[model_name]
 
+    config_tokenizer = config_dict.get("tokenizer")
+    tokenizer_choice = args.tokenizer or config_tokenizer or "char"
+    if config_tokenizer and args.tokenizer and args.tokenizer != config_tokenizer:
+        print(
+            f"[warning] CLI tokenizer '{args.tokenizer}' differs from checkpoint tokenizer '{config_tokenizer}'; "
+            "using CLI selection."
+        )
+    elif not args.tokenizer and config_tokenizer:
+        tokenizer_choice = config_tokenizer
+
     data_path = _resolve_dataset(args.data, args.data_path)
-    _, _, tokenizer = _load_tokenizer(data_path, model_config.seq_len, args.data_frac)
+    _, _, tokenizer = _load_tokenizer(
+        data_path,
+        model_config.seq_len,
+        args.data_frac,
+        tokenizer_choice,
+    )
 
     model = TransformerLM(model_config)
     model.load_state_dict(checkpoint["model"])
@@ -291,7 +403,7 @@ def _run_generation(args: argparse.Namespace) -> None:
 
     prompt_tokens = tokenizer.encode(args.prompt)
     if not prompt_tokens:
-        raise ValueError("Prompt must contain at least one known character to tokenize.")
+        raise ValueError("Prompt must contain at least one known token to tokenize.")
     prompt_tensor = torch.tensor([prompt_tokens], dtype=torch.long, device=device)
     with torch.no_grad():
         output = model.generate(prompt_tensor, args.max_new_tokens)
@@ -299,18 +411,24 @@ def _run_generation(args: argparse.Namespace) -> None:
     print(decoded)
 
 
+
+def _run_info(args: argparse.Namespace) -> None:
+    config = MODEL_PRESETS[args.model]
+    model = TransformerLM(config)
+    param_count = sum(param.numel() for param in model.parameters())
+    print(f"Preset: {args.model}")
+    for field in ("vocab_size", "seq_len", "d_model", "n_layers", "n_heads", "d_ff", "dropout", "rotary_base"):
+        value = getattr(config, field)
+        print(f"  {field}: {value}")
+    print(f"Parameters: {param_count:,}")
+
+
 def _run_memory_analysis(args: argparse.Namespace) -> None:
     device = torch.device(args.device)
     if device.type != "cuda":
         raise RuntimeError("Memory analysis requires a CUDA device.")
 
-    dtype_map = {
-        "float32": torch.float32,
-        "float16": torch.float16,
-        "bfloat16": torch.bfloat16,
-    }
-    dtype = dtype_map[args.dtype]
-
+    dtype = resolve_dtype(args.dtype)
     preset_config = MODEL_PRESETS[args.model]
     config = preset_config
     if args.seq_len is not None:
@@ -334,7 +452,8 @@ def _run_memory_analysis(args: argparse.Namespace) -> None:
     model.zero_grad(set_to_none=True)
 
     analyzer = MemoryAnalyzer(device)
-    torch.cuda.set_device(device)
+    if device.index is not None:
+        torch.cuda.set_device(device.index)
     torch.cuda.empty_cache()
     torch.cuda.reset_peak_memory_stats(device)
 
@@ -354,7 +473,7 @@ def _run_memory_analysis(args: argparse.Namespace) -> None:
     )
 
     with analyzer.section("forward_pass"):
-        logits, loss = model(input_tokens, targets=targets, memory_analyzer=analyzer)
+        _, loss = model(input_tokens, targets=targets, memory_analyzer=analyzer)
 
     if loss is not None and not args.no_backward:
         with analyzer.section("backward"):
@@ -375,6 +494,8 @@ def main() -> None:
         _run_training(args)
     elif args.command == "generate":
         _run_generation(args)
+    elif args.command == "info":
+        _run_info(args)
     elif args.command == "analyze-memory":
         _run_memory_analysis(args)
     else:  # pragma: no cover - safety catch for argparse
@@ -383,4 +504,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

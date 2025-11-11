@@ -32,7 +32,14 @@ class RMSNorm(nn.Module):
         return self.weight * x
 
 
-def rotary_emb(head_dim: int, seq_len: int, base: float, device: torch.device) -> Tuple[torch.Tensor, torch.Tensor]:
+def rotary_emb(
+    head_dim: int,
+    seq_len: int,
+    base: float,
+    device: torch.device,
+    *,
+    dtype: torch.dtype = torch.float32,
+) -> Tuple[torch.Tensor, torch.Tensor]:
     if head_dim % 2 != 0:
         raise ValueError("head_dim must be even to use rotary embeddings")
     theta = torch.arange(head_dim // 2, device=device, dtype=torch.float32)
@@ -41,10 +48,16 @@ def rotary_emb(head_dim: int, seq_len: int, base: float, device: torch.device) -
     freqs = torch.outer(seq_idx, theta)
     cos = torch.cos(freqs)
     sin = torch.sin(freqs)
+    if dtype != torch.float32:
+        cos = cos.to(dtype=dtype)
+        sin = sin.to(dtype=dtype)
     return cos, sin
 
 
 def apply_rotary(q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    if cos.dtype != q.dtype:
+        cos = cos.to(dtype=q.dtype)
+        sin = sin.to(dtype=q.dtype)
     q1, q2 = q[..., ::2], q[..., 1::2]
     k1, k2 = k[..., ::2], k[..., 1::2]
     # Broadcast rotary frequencies to [batch, heads, seq, head_dim / 2]
@@ -163,16 +176,20 @@ class TransformerLM(nn.Module):
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         batch, seq_len = idx.shape
         device = idx.device
-        with _memory_section(memory_analyzer, "rotary_emb"):
-            cos, sin = rotary_emb(
-                self.config.head_dim, self.config.seq_len, self.config.rotary_base, device
-            )
-
         with _memory_section(memory_analyzer, "token_embedding"):
             x = self.token_emb(idx)
+        with _memory_section(memory_analyzer, "rotary_emb"):
+            cos, sin = rotary_emb(
+                self.config.head_dim,
+                self.config.seq_len,
+                self.config.rotary_base,
+                device,
+                dtype=x.dtype,
+            )
         for i, block in enumerate(self.blocks):
             label = f"block_{i}"
             if self.gradient_checkpointing and self.training:
+
                 def block_forward(inp: torch.Tensor) -> torch.Tensor:
                     with _memory_section(memory_analyzer, label):
                         return block(
