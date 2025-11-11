@@ -176,6 +176,7 @@ class Trainer:
         was_training = self.model.training
         self.model.eval()
         outputs = []
+        wandb_table = None
         with torch.no_grad():
             for idx, prompt in enumerate(self.config.sample_prompts):
                 try:
@@ -191,6 +192,9 @@ class Trainer:
                 text = self.tokenizer.decode(generated[0].tolist())
                 outputs.append((idx, prompt, text))
                 if self.config.use_wandb and wandb is not None:
+                    if wandb_table is None:
+                        wandb_table = wandb.Table(columns=["step", "sample", "prompt", "completion"])
+                    wandb_table.add_data(step, idx, prompt, text)
                     wandb.log({f"samples/{idx}": text}, step=step)
                 if sample_dir is not None:
                     file_path = sample_dir / f"step_{step:06d}_sample_{idx}.txt"
@@ -198,6 +202,9 @@ class Trainer:
 
         if was_training:
             self.model.train()
+
+        if wandb_table is not None:
+            wandb.log({"eval/samples": wandb_table}, step=step)
 
         for idx, prompt, text in outputs:
             separator = "-" * 80
