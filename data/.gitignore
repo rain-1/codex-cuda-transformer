@@ -1,2 +1,6 @@
 *
 !.gitignore
+<<<<<<< HEAD
+=======
+build/
+>>>>>>> origin/main
