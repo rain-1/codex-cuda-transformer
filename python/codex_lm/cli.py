@@ -182,9 +182,6 @@ def parse_args() -> argparse.Namespace:
     info_parser = subparsers.add_parser("info", help="Print information about a model preset")
     info_parser.add_argument("model", choices=MODEL_PRESETS.keys(), help="Model size preset")
 
-    info_parser = subparsers.add_parser("info", help="Print information about a model preset")
-    info_parser.add_argument("model", choices=MODEL_PRESETS.keys(), help="Model size preset")
-
     analyze_parser = subparsers.add_parser(
         "analyze-memory", help="Profile CUDA memory usage for a model forward pass"
     )
