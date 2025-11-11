@@ -128,7 +128,10 @@ class Trainer:
                 "step_time": step_time,
             }
             if self.config.use_wandb and wandb is not None:
-                wandb.log(log_data)
+                commit_now = True
+                if self.config.eval_interval > 0 and step % self.config.eval_interval == 0:
+                    commit_now = False
+                wandb.log(log_data, step=step, commit=commit_now)
             else:
                 print(f"step {step:06d} loss={loss_val:.4f} lr={log_data['lr']:.3e} time={step_time:.2f}s")
 

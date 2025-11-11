@@ -36,6 +36,19 @@ def _default_device() -> str:
 
 DATASET_CHOICES = ("tinyshakespeare", "tinystories", "custom")
 
+DEFAULT_SAMPLE_PROMPTS: dict[str, tuple[str, ...]] = {
+    "tinyshakespeare": (
+        "ROMEO: ",
+        "HAMLET: ",
+    ),
+    "tinystories": (
+        "Once upon a time",
+        "The robot ",
+    ),
+}
+
+FALLBACK_SAMPLE_PROMPTS: tuple[str, ...] = ("Once upon a time",)
+
 
 def _add_data_args(
     parser: argparse.ArgumentParser,
@@ -297,6 +310,13 @@ def _run_training(args: argparse.Namespace) -> None:
         collate_fn=collate_batch,
     )
 
+    if args.sample_prompt:
+        sample_prompts = tuple(args.sample_prompt)
+    else:
+        sample_prompts = DEFAULT_SAMPLE_PROMPTS.get(args.data, FALLBACK_SAMPLE_PROMPTS)
+        prompt_preview = ", ".join(repr(prompt) for prompt in sample_prompts)
+        print(f"[info] using default sample prompts for {args.data}: {prompt_preview}")
+
     train_config = TrainingConfig(
         model_name=args.model,
         batch_size=args.batch_size,
@@ -315,7 +335,7 @@ def _run_training(args: argparse.Namespace) -> None:
         wandb_project=args.wandb_project,
         wandb_run=args.wandb_run,
         override_model=model_config,
-        sample_prompts=tuple(args.sample_prompt),
+        sample_prompts=sample_prompts,
         sample_max_new_tokens=args.sample_max_new_tokens,
         sample_dir=args.sample_dir,
         tokenizer=tokenizer_choice,
