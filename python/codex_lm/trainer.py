@@ -13,7 +13,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 
 from .config import MODEL_PRESETS, ModelConfig
-from .data import Batch, CharacterTokenizer, cosine_warmup, cycle
+from .data import Batch, Tokenizer, cosine_warmup, cycle
 from .model import TransformerLM
 
 try:  # Optional wandb logging
@@ -43,6 +43,7 @@ class TrainingConfig:
     sample_prompts: tuple[str, ...] = ()
     sample_max_new_tokens: int = 200
     sample_dir: Optional[pathlib.Path] = None
+    tokenizer: str = "char"
 
     def model_config(self) -> ModelConfig:
         return self.override_model or MODEL_PRESETS[self.model_name]
@@ -62,7 +63,7 @@ class Trainer:
         optimizer: torch.optim.Optimizer,
         scheduler: Optional[torch.optim.lr_scheduler.LambdaLR],
         config: TrainingConfig,
-        tokenizer: Optional[CharacterTokenizer] = None,
+        tokenizer: Optional[Tokenizer] = None,
     ):
         self.model = model
         self.optimizer = optimizer

@@ -10,7 +10,7 @@ Three presets expose progressively larger configurations while keeping the archi
 |------|----------------------|--------|-----------|-------|---------|---------|
 | `pico` | ~5M | 6 | 256 | 8 | 1024 | 256 |
 | `nano` | ~50M | 12 | 512 | 8 | 2048 | 512 |
-| `micro` | ~500M | 24 | 1024 | 16 | 8192 | 1024 |
+| `micro` | ~200M | 16 | 640 | 16 | 3328 | 1024 |
 
 Each preset can adjust the vocabulary size automatically to match the dataset tokenization.
 
@@ -29,6 +29,18 @@ To train on [TinyStories](https://huggingface.co/datasets/roneneldan/TinyStories
 
 ```bash
 python -m codex_lm train pico tinystories --steps 2000 --wandb
+```
+
+Switch to a word-and-punctuation tokenizer by adding `--tokenizer word`:
+
+```bash
+python -m codex_lm train pico tinystories --tokenizer word --steps 2000 --wandb
+```
+
+See preset details (layers, dimensions, parameter counts) without launching training:
+
+```bash
+python -m codex_lm info nano
 ```
 
 If you only need a smaller subset of a large corpus (to reduce RAM or download time), limit the amount of text consumed via `--data-frac`, e.g.:
@@ -55,7 +67,7 @@ The binary shares the same preset definitions and training tricks as the Python 
 
 ## Datasets
 
-Text files are stored under the `data/` directory. The Python utilities can download Tiny Shakespeare automatically, while the C++ runner expects the file to exist locally. TinyStories downloads are pulled directly from Hugging Face (training and validation splits) and merged into a single `tinystories.txt` file with `<|endoftext|>`/`<|end_of_sequence|>` markers replaced by blank lines. When a dataset exceeds ~256 MiB it is automatically converted into a disk-backed token cache (`*.tokens.npy` + metadata) so that training can stream batches without loading every token into RAM; the first run will create this cache and later runs reuse it. Use `--data-frac <fraction>` (e.g., `0.1` for 10 %) to keep only the leading portion of massive corpora. For larger experiments consider datasets such as Simple English Wikipedia once tokenization is adapted.
+Text files are stored under the `data/` directory. The Python utilities can download Tiny Shakespeare automatically, while the C++ runner expects the file to exist locally. TinyStories downloads are pulled directly from Hugging Face (training and validation splits) and merged into a single `tinystories.txt` file with `<|endoftext|>`/`<|end_of_sequence|>` markers replaced by blank lines. When a dataset exceeds ~256 MiB it is automatically converted into a disk-backed token cache (`*.tokens.npy` + metadata, keyed by tokenizer choice) so that training can stream batches without loading every token into RAM; the first run will create this cache and later runs reuse it. Use `--data-frac <fraction>` (e.g., `0.1` for 10 %) to keep only the leading portion of massive corpora, and `--tokenizer word` to tokenize into words/punctuation instead of raw characters. For larger experiments consider datasets such as Simple English Wikipedia once tokenization is adapted.
 
 ## Checkpoints
 
