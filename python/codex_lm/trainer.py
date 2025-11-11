@@ -1,6 +1,7 @@
 """Training utilities for the Codex Transformer."""
 from __future__ import annotations
 
+import html
 import math
 import time
 from contextlib import nullcontext
@@ -176,7 +177,7 @@ class Trainer:
         was_training = self.model.training
         self.model.eval()
         outputs = []
-        wandb_table = None
+        wandb_rows = []
         with torch.no_grad():
             for idx, prompt in enumerate(self.config.sample_prompts):
                 try:
@@ -192,10 +193,18 @@ class Trainer:
                 text = self.tokenizer.decode(generated[0].tolist())
                 outputs.append((idx, prompt, text))
                 if self.config.use_wandb and wandb is not None:
-                    if wandb_table is None:
-                        wandb_table = wandb.Table(columns=["step", "sample", "prompt", "completion"])
-                    wandb_table.add_data(step, idx, prompt, text)
-                    wandb.log({f"samples/{idx}": text}, step=step)
+                    wandb_rows.append([step, idx, prompt, text])
+                    html_prompt = html.escape(prompt)
+                    html_text = html.escape(text)
+                    wandb.log(
+                        {
+                            f"samples/{idx}": wandb.Html(
+                                f"<div><h4>Prompt</h4><pre>{html_prompt}</pre><h4>Completion</h4><pre>{html_text}</pre></div>"
+                            )
+                        },
+                        step=step,
+                        commit=False,
+                    )
                 if sample_dir is not None:
                     file_path = sample_dir / f"step_{step:06d}_sample_{idx}.txt"
                     file_path.write_text(text, encoding="utf-8")
@@ -203,7 +212,8 @@ class Trainer:
         if was_training:
             self.model.train()
 
-        if wandb_table is not None:
+        if wandb_rows and self.config.use_wandb and wandb is not None:
+            wandb_table = wandb.Table(columns=["step", "sample", "prompt", "completion"], data=wandb_rows)
             wandb.log({"eval/samples": wandb_table}, step=step)
 
         for idx, prompt, text in outputs:
