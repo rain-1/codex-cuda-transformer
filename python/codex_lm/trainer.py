@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import math
 import time
+from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Iterator, Optional
 
@@ -14,6 +15,7 @@ from torch.utils.data import DataLoader
 
 from .config import MODEL_PRESETS, ModelConfig
 from .data import Batch, Tokenizer, cosine_warmup, cycle
+from .dtypes import resolve_dtype
 from .model import TransformerLM
 
 try:  # Optional wandb logging
@@ -35,6 +37,7 @@ class TrainingConfig:
     eval_iters: int
     grad_clip: float
     device: str = "cuda"
+    dtype: str = "float32"
     compile: bool = False
     use_wandb: bool = False
     wandb_project: str = "codex-transformer"
@@ -70,9 +73,11 @@ class Trainer:
         self.scheduler = scheduler
         self.config = config
         self.device = torch.device(config.device)
+        self.dtype = resolve_dtype(config.dtype)
         self.tokenizer = tokenizer
 
-        self.scaler = torch.amp.GradScaler("cuda", enabled=self.device.type == "cuda")
+        use_grad_scaler = self.device.type == "cuda" and self.dtype == torch.float16
+        self.scaler = torch.amp.GradScaler("cuda", enabled=use_grad_scaler)
 
         if config.use_wandb and wandb is not None:
             wandb.init(project=config.wandb_project, name=config.wandb_run, config=config.__dict__)
@@ -83,7 +88,7 @@ class Trainer:
         val_loader: DataLoader[Batch],
     ) -> None:
         device = self.device
-        self.model.to(device)
+        self.model.to(device=device)
         if self.config.compile:
             self.model = torch.compile(self.model)
         model = self.model
@@ -98,7 +103,7 @@ class Trainer:
             self.optimizer.zero_grad(set_to_none=True)
             for _ in range(accum_steps):
                 batch = _prepare_batch(next(train_iter), device)
-                with torch.amp.autocast("cuda", enabled=device.type == "cuda"):
+                with self._autocast_context():
                     _, loss = model(batch.x, batch.y)
                 assert loss is not None
                 losses.append(loss.detach())
@@ -148,7 +153,8 @@ class Trainer:
                     iterator = iter(loader)
                     raw_batch = next(iterator)
                 batch = _prepare_batch(raw_batch, self.device)
-                _, loss = self.model(batch.x, batch.y)
+                with self._autocast_context():
+                    _, loss = self.model(batch.x, batch.y)
                 assert loss is not None
                 losses.append(loss.item())
         self.model.train()
@@ -196,6 +202,11 @@ class Trainer:
         for idx, prompt, text in outputs:
             separator = "-" * 80
             print(f"sample[{idx}] @ step {step}\nprompt: {prompt}\n{separator}\n{text}\n{separator}")
+
+    def _autocast_context(self):
+        if self.device.type == "cuda" and self.dtype in (torch.float16, torch.bfloat16):
+            return torch.amp.autocast("cuda", dtype=self.dtype)
+        return nullcontext()
 
 
 def create_optimizer(model: nn.Module, config: TrainingConfig) -> torch.optim.Optimizer:
