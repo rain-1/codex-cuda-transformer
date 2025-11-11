@@ -2,14 +2,22 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
-from typing import Optional, Tuple
+from contextlib import nullcontext
+from typing import TYPE_CHECKING, Optional, Tuple
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
 
 from .config import ModelConfig
+
+if TYPE_CHECKING:  # pragma: no cover - used for type checking only
+    from .memory import MemoryAnalyzer
+
+
+def _memory_section(analyzer: "MemoryAnalyzer" | None, name: str):
+    return analyzer.section(name) if analyzer is not None else nullcontext()
 
 
 class RMSNorm(nn.Module):
@@ -56,22 +64,40 @@ class MultiHeadAttention(nn.Module):
         self.dropout = nn.Dropout(config.dropout)
         self.register_buffer("mask", torch.tril(torch.ones(config.seq_len, config.seq_len)), persistent=False)
 
-    def forward(self, x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        x: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        *,
+        memory_analyzer: "MemoryAnalyzer" | None = None,
+        label: Optional[str] = None,
+    ) -> torch.Tensor:
         batch, seq_len, _ = x.shape
-        qkv = self.qkv(x)
-        qkv = qkv.view(batch, seq_len, 3, self.config.n_heads, self.config.head_dim)
-        qkv = qkv.permute(2, 0, 3, 1, 4)
-        q, k, v = qkv[0], qkv[1], qkv[2]
-        q, k = apply_rotary(q, k, cos[:seq_len], sin[:seq_len])
+        scope = label or "attention"
+        with _memory_section(memory_analyzer, f"{scope}.qkv_proj"):
+            qkv = self.qkv(x)
+            qkv = qkv.view(batch, seq_len, 3, self.config.n_heads, self.config.head_dim)
+            qkv = qkv.permute(2, 0, 3, 1, 4)
+            q, k, v = qkv[0], qkv[1], qkv[2]
 
-        attn_scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.config.head_dim)
-        mask = self.mask[:seq_len, :seq_len]
-        attn_scores = attn_scores.masked_fill(mask == 0, float("-inf"))
-        attn = torch.softmax(attn_scores, dim=-1)
-        attn = self.dropout(attn)
-        out = torch.matmul(attn, v)
-        out = out.transpose(1, 2).contiguous().view(batch, seq_len, self.config.d_model)
-        return self.out(out)
+        with _memory_section(memory_analyzer, f"{scope}.rotary"):
+            q, k = apply_rotary(q, k, cos[:seq_len], sin[:seq_len])
+
+        with _memory_section(memory_analyzer, f"{scope}.scores"):
+            attn_scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.config.head_dim)
+            mask = self.mask[:seq_len, :seq_len]
+            attn_scores = attn_scores.masked_fill(mask == 0, float("-inf"))
+
+        with _memory_section(memory_analyzer, f"{scope}.softmax"):
+            attn = torch.softmax(attn_scores, dim=-1)
+            attn = self.dropout(attn)
+
+        with _memory_section(memory_analyzer, f"{scope}.output"):
+            out = torch.matmul(attn, v)
+            out = out.transpose(1, 2).contiguous().view(batch, seq_len, self.config.d_model)
+            out = self.out(out)
+        return out
 
 
 class FeedForward(nn.Module):
@@ -96,38 +122,88 @@ class TransformerBlock(nn.Module):
         self.norm2 = RMSNorm(config.d_model)
         self.ff = FeedForward(config)
 
-    def forward(self, x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
-        attn_out = self.attn(self.norm1(x), cos, sin)
+    def forward(
+        self,
+        x: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        *,
+        memory_analyzer: "MemoryAnalyzer" | None = None,
+        block_label: Optional[str] = None,
+    ) -> torch.Tensor:
+        prefix = block_label or "block"
+        with _memory_section(memory_analyzer, f"{prefix}.norm1"):
+            norm_x = self.norm1(x)
+        with _memory_section(memory_analyzer, f"{prefix}.attn"):
+            attn_out = self.attn(norm_x, cos, sin, memory_analyzer=memory_analyzer, label=f"{prefix}.attn")
         x = x + attn_out
-        ff_out = self.ff(self.norm2(x))
+        with _memory_section(memory_analyzer, f"{prefix}.norm2"):
+            norm_x = self.norm2(x)
+        with _memory_section(memory_analyzer, f"{prefix}.ff"):
+            ff_out = self.ff(norm_x)
         return x + ff_out
 
 
 class TransformerLM(nn.Module):
-    def __init__(self, config: ModelConfig):
+    def __init__(self, config: ModelConfig, *, gradient_checkpointing: bool = False):
         super().__init__()
         self.config = config
+        self.gradient_checkpointing = gradient_checkpointing
         self.token_emb = nn.Embedding(config.vocab_size, config.d_model)
         self.blocks = nn.ModuleList([TransformerBlock(config) for _ in range(config.n_layers)])
         self.norm = RMSNorm(config.d_model)
         self.lm_head = nn.Linear(config.d_model, config.vocab_size, bias=False)
 
-    def forward(self, idx: torch.Tensor, targets: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+    def forward(
+        self,
+        idx: torch.Tensor,
+        targets: Optional[torch.Tensor] = None,
+        *,
+        memory_analyzer: "MemoryAnalyzer" | None = None,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         batch, seq_len = idx.shape
         device = idx.device
-        cos, sin = rotary_emb(self.config.head_dim, self.config.seq_len, self.config.rotary_base, device)
+        with _memory_section(memory_analyzer, "rotary_emb"):
+            cos, sin = rotary_emb(
+                self.config.head_dim, self.config.seq_len, self.config.rotary_base, device
+            )
 
-        x = self.token_emb(idx)
-        for block in self.blocks:
-            x = block(x, cos, sin)
-        x = self.norm(x)
-        logits = self.lm_head(x)
+        with _memory_section(memory_analyzer, "token_embedding"):
+            x = self.token_emb(idx)
+        for i, block in enumerate(self.blocks):
+            label = f"block_{i}"
+            if self.gradient_checkpointing and self.training:
+                def block_forward(inp: torch.Tensor) -> torch.Tensor:
+                    with _memory_section(memory_analyzer, label):
+                        return block(
+                            inp,
+                            cos,
+                            sin,
+                            memory_analyzer=memory_analyzer,
+                            block_label=label,
+                        )
+
+                x = checkpoint(block_forward, x)
+            else:
+                with _memory_section(memory_analyzer, label):
+                    x = block(
+                        x,
+                        cos,
+                        sin,
+                        memory_analyzer=memory_analyzer,
+                        block_label=label,
+                    )
+        with _memory_section(memory_analyzer, "final_norm"):
+            x = self.norm(x)
+        with _memory_section(memory_analyzer, "lm_head"):
+            logits = self.lm_head(x)
 
         loss = None
         if targets is not None:
-            logits_view = logits.view(batch * seq_len, -1)
-            targets_view = targets.view(batch * seq_len)
-            loss = F.cross_entropy(logits_view, targets_view)
+            with _memory_section(memory_analyzer, "loss"):
+                logits_view = logits.view(batch * seq_len, -1)
+                targets_view = targets.view(batch * seq_len)
+                loss = F.cross_entropy(logits_view, targets_view)
         return logits, loss
 
     @torch.no_grad()

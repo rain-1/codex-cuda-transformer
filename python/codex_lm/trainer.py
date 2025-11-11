@@ -34,6 +34,8 @@ class TrainingConfig:
     eval_interval: int
     eval_iters: int
     grad_clip: float
+    gradient_accumulation_steps: Optional[int] = None
+    gradient_checkpointing: bool = False
     device: str = "cuda"
     compile: bool = False
     use_wandb: bool = False
@@ -71,6 +73,9 @@ class Trainer:
         self.device = torch.device(config.device)
         self.tokenizer = tokenizer
 
+        if hasattr(self.model, "gradient_checkpointing"):
+            self.model.gradient_checkpointing = config.gradient_checkpointing  # type: ignore[attr-defined]
+
         self.scaler = torch.amp.GradScaler("cuda", enabled=self.device.type == "cuda")
 
         if config.use_wandb and wandb is not None:
@@ -89,7 +94,12 @@ class Trainer:
 
         model.train()
         train_iter: Iterator[Batch] = cycle(train_loader)
-        accum_steps = max(1, self.config.batch_size // self.config.micro_batch_size)
+        accum_steps = (
+            self.config.gradient_accumulation_steps
+            if self.config.gradient_accumulation_steps is not None
+            else self.config.batch_size // self.config.micro_batch_size
+        )
+        accum_steps = max(1, accum_steps)
         best_val = float("inf")
         for step in range(1, self.config.num_steps + 1):
             start = time.time()
