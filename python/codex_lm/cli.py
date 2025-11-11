@@ -33,8 +33,12 @@ def _default_device() -> str:
     return "cuda" if torch.cuda.is_available() else "cpu"
 
 
-def _add_data_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("data", choices=["tinyshakespeare", "tinystories", "custom"], help="Dataset choice")
+DATASET_CHOICES = ("tinyshakespeare", "tinystories", "custom")
+
+
+def _add_data_args(parser: argparse.ArgumentParser, *, include_positional: bool = True) -> None:
+    if include_positional:
+        parser.add_argument("data", choices=DATASET_CHOICES, help="Dataset choice")
     parser.add_argument("--data-path", type=pathlib.Path, default=None, help="Path to custom dataset")
     parser.add_argument(
         "--data-frac",
@@ -133,8 +137,16 @@ def parse_args() -> argparse.Namespace:
     )
 
     generate_parser = subparsers.add_parser("generate", help="Run inference with a saved checkpoint")
-    generate_parser.add_argument("checkpoint", type=pathlib.Path, help="Path to the saved model checkpoint")
-    _add_data_args(generate_parser)
+    generate_parser.add_argument(
+        "generate_args",
+        nargs=2,
+        metavar=("checkpoint", "data"),
+        help=(
+            "Checkpoint path and dataset choice (tinyshakespeare, tinystories, or custom). The order "
+            "of these two arguments is flexible for backwards compatibility."
+        ),
+    )
+    _add_data_args(generate_parser, include_positional=False)
     generate_parser.add_argument("--prompt", type=str, required=True, help="Prompt text used to start generation")
     generate_parser.add_argument(
         "--max-new-tokens",
@@ -181,7 +193,33 @@ def parse_args() -> argparse.Namespace:
         help="Skip the backward() call when profiling (forward pass only).",
     )
 
-    return parser.parse_args()
+    args = parser.parse_args()
+
+    if args.command == "generate":
+        first, second = args.generate_args
+        dataset_options = set(DATASET_CHOICES)
+
+        if first in dataset_options and second in dataset_options:
+            parser.error(
+                "Provide exactly one dataset choice and one checkpoint path when using the generate command."
+            )
+
+        if first in dataset_options:
+            data_choice = first
+            checkpoint_str = second
+        elif second in dataset_options:
+            data_choice = second
+            checkpoint_str = first
+        else:
+            parser.error(
+                "Could not determine the dataset choice. Expected one of tinyshakespeare, tinystories, or custom."
+            )
+
+        args.checkpoint = pathlib.Path(checkpoint_str)
+        args.data = data_choice
+        delattr(args, "generate_args")
+
+    return args
 
 
 def _maybe_adjust_config(config: ModelConfig, tokenizer: CharacterTokenizer) -> ModelConfig:
@@ -282,7 +320,8 @@ def _run_generation(args: argparse.Namespace) -> None:
 
 
 def _run_memory_analysis(args: argparse.Namespace) -> None:
-    device = torch.device(args.device)
+    device_spec = args.device
+    device = torch.device(device_spec)
     if device.type != "cuda":
         raise RuntimeError("Memory analysis requires a CUDA device.")
 
@@ -316,7 +355,8 @@ def _run_memory_analysis(args: argparse.Namespace) -> None:
     model.zero_grad(set_to_none=True)
 
     analyzer = MemoryAnalyzer(device)
-    torch.cuda.set_device(device)
+    if device.index is not None:
+        torch.cuda.set_device(device.index)
     torch.cuda.empty_cache()
     torch.cuda.reset_peak_memory_stats(device)
 
