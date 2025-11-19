@@ -14,6 +14,9 @@ Three presets expose progressively larger configurations while keeping the archi
 
 Each preset can adjust the vocabulary size automatically to match the dataset tokenization.
 
+<img width="988" height="815" alt="image" src="https://github.com/user-attachments/assets/158dd35d-1564-4436-988e-7a75daeefe51" />
+
+
 ## Python training
 
 The Python implementation lives under [`python/codex_lm`](python/codex_lm). Install dependencies and launch training:
