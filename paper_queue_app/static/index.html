@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Paper Queue</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <header>
+      <h1>Paper Queue</h1>
+      <p>Track what you're reading, with ArXiv import and local-first storage.</p>
+    </header>
+
+    <section class="panel">
+      <h2>Add paper from ArXiv</h2>
+      <div class="row">
+        <input id="arxivInput" type="text" placeholder="e.g. 1706.03762 or https://arxiv.org/abs/1706.03762" />
+        <select id="projectForAdd"></select>
+        <button id="fetchBtn">Add</button>
+      </div>
+      <p id="addStatus" class="muted"></p>
+    </section>
+
+    <section class="panel controls">
+      <div class="row wrap">
+        <label>Search <input id="searchInput" type="text" placeholder="title, abstract, author, tag" /></label>
+        <label>Project <select id="projectFilter"></select></label>
+        <label>Status
+          <select id="statusFilter">
+            <option value="queue">Queue (default)</option>
+            <option value="all">All</option>
+            <option value="reading">Reading</option>
+            <option value="finished">Finished</option>
+            <option value="starred">Starred</option>
+          </select>
+        </label>
+        <label><input type="checkbox" id="includeArchived" /> Include archived/finished in search</label>
+      </div>
+      <div class="row wrap">
+        <input id="newProjectName" type="text" placeholder="New project name" />
+        <button id="createProjectBtn">Create project</button>
+        <button id="exportBtn">Export JSON</button>
+        <label class="buttonlike">Import JSON <input id="importInput" type="file" accept="application/json" hidden /></label>
+      </div>
+    </section>
+
+    <section>
+      <h2>Papers</h2>
+      <div id="paperGrid" class="grid"></div>
+      <p id="emptyState" class="muted"></p>
+    </section>
+
+    <template id="paperCardTpl">
+      <article class="card">
+        <div class="card-header">
+          <h3 class="title"></h3>
+          <button class="starBtn" title="Toggle star">☆</button>
+        </div>
+        <p class="meta"></p>
+        <p class="abstract"></p>
+        <div class="badges"></div>
+        <div class="row wrap actions">
+          <button class="startBtn">Start reading</button>
+          <button class="finishBtn">Mark finished</button>
+          <button class="archiveBtn">Archive</button>
+          <button class="deleteBtn danger">Delete</button>
+        </div>
+        <div class="row wrap">
+          <label>Progress <input class="progressInput" type="range" min="0" max="100" /></label>
+          <span class="progressLabel"></span>
+          <label>Rating
+            <select class="ratingSelect">
+              <option value="">-</option>
+              <option value="1">1</option>
+              <option value="2">2</option>
+              <option value="3">3</option>
+              <option value="4">4</option>
+              <option value="5">5</option>
+            </select>
+          </label>
+          <label>Project <select class="projectSelect"></select></label>
+        </div>
+        <label>Tags (comma separated)<input class="tagsInput" type="text" /></label>
+        <label>Notes<textarea class="notesInput" rows="3"></textarea></label>
+        <p class="links"></p>
+      </article>
+    </template>
+
+    <script src="/app.js"></script>
+  </body>
+</html>

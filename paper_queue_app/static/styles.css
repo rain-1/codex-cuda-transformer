@@ -1,0 +1,107 @@
+:root {
+  color-scheme: light dark;
+  font-family: Inter, system-ui, sans-serif;
+}
+
+body {
+  margin: 1.5rem;
+  max-width: 1200px;
+}
+
+h1, h2, h3 {
+  margin: 0.4rem 0;
+}
+
+.panel {
+  border: 1px solid #8886;
+  border-radius: 10px;
+  padding: 1rem;
+  margin: 1rem 0;
+}
+
+.row {
+  display: flex;
+  gap: 0.6rem;
+  align-items: center;
+}
+
+.wrap { flex-wrap: wrap; }
+
+input, select, textarea, button {
+  padding: 0.45rem;
+}
+
+input[type="text"], textarea { min-width: 240px; }
+
+button, .buttonlike {
+  border: 1px solid #8888;
+  border-radius: 8px;
+  background: transparent;
+  cursor: pointer;
+}
+
+.buttonlike {
+  padding: 0.45rem 0.65rem;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+  gap: 1rem;
+}
+
+.card {
+  border: 1px solid #8886;
+  border-radius: 10px;
+  padding: 0.8rem;
+}
+
+.card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: start;
+  gap: 0.4rem;
+}
+
+.title {
+  font-size: 1.02rem;
+  margin: 0;
+}
+
+.meta, .muted {
+  color: #888;
+}
+
+.abstract {
+  font-size: 0.95rem;
+}
+
+.badges {
+  display: flex;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+  margin: 0.4rem 0;
+}
+
+.badge {
+  font-size: 0.78rem;
+  border: 1px solid #8887;
+  border-radius: 999px;
+  padding: 0.1rem 0.5rem;
+}
+
+.starBtn {
+  font-size: 1.1rem;
+  min-width: 2rem;
+}
+
+.actions button { font-size: 0.85rem; }
+
+.danger {
+  border-color: #c44;
+  color: #c44;
+}
+
+.links {
+  font-size: 0.88rem;
+}
