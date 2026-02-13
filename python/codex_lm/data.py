@@ -182,6 +182,32 @@ class TextDataset(Dataset[Batch]):
         return Batch(x, y)
 
 
+class DocumentAlignedDataset(Dataset[Batch]):
+    """Dataset that respects document boundaries and truncates long documents.
+
+    Each item corresponds to a contiguous slice within the first
+    ``max_tokens_per_doc`` tokens of a single document. Windows never cross
+    document boundaries, preserving the beginning-of-document token in the
+    context and preventing any one document from dominating a training step.
+    """
+
+    def __init__(self, windows: Sequence[torch.Tensor], seq_len: int, max_tokens_per_doc: int):
+        if not windows:
+            raise ValueError("DocumentAlignedDataset requires at least one window.")
+        self.windows = windows
+        self.seq_len = seq_len
+        self.max_tokens_per_doc = max_tokens_per_doc
+
+    def __len__(self) -> int:  # type: ignore[override]
+        return len(self.windows)
+
+    def __getitem__(self, idx: int) -> Batch:  # type: ignore[override]
+        window = self.windows[idx]
+        x = window[: self.seq_len]
+        y = window[1 : self.seq_len + 1]
+        return Batch(x, y)
+
+
 def collate_batch(items: Sequence[Batch]) -> Batch:
     xs = torch.stack([item.x for item in items], dim=0)
     ys = torch.stack([item.y for item in items], dim=0)
@@ -195,11 +221,31 @@ def build_dataset(
     seed: int = 42,
     fraction: float = 1.0,
     tokenizer: TokenizerKind = "char",
-) -> Tuple[TextDataset, TextDataset, Tokenizer]:
+    document_aligned: bool = False,
+    max_document_tokens: int = 2048,
+) -> Tuple[Dataset[Batch], Dataset[Batch], Tokenizer]:
     if not (0 < fraction <= 1.0):
         raise ValueError("fraction must be in the range (0, 1].")
+    if document_aligned and max_document_tokens <= 0:
+        raise ValueError("max_document_tokens must be positive when document_aligned is True.")
     random.seed(seed)
     tokens, tokenizer_obj = _load_or_cache_tokens(path, tokenizer)
+
+    if document_aligned:
+        target_tokens = int(tokens.numel() * fraction)
+        target_tokens = max(seq_len + 1, target_tokens)
+        documents = _tokenize_documents(path, tokenizer_obj, target_tokens, max_document_tokens)
+        windows = _build_document_aligned_windows(documents, seq_len, max_document_tokens)
+        if len(windows) < 2:
+            raise ValueError(
+                "Not enough document-aligned windows to create train/validation splits."
+            )
+        random.shuffle(windows)
+        split_idx = int(len(windows) * split_ratio)
+        split_idx = min(max(1, split_idx), len(windows) - 1)
+        train_dataset = DocumentAlignedDataset(windows[:split_idx], seq_len, max_document_tokens)
+        val_dataset = DocumentAlignedDataset(windows[split_idx:], seq_len, max_document_tokens)
+        return train_dataset, val_dataset, tokenizer_obj
 
     usable = int(tokens.numel() * fraction)
     usable = max(seq_len + 1, usable)
@@ -227,11 +273,64 @@ def cosine_warmup(iteration: int, total_iters: int, warmup_iters: int) -> float:
     return 0.5 * (1 + math.cos(math.pi * progress))
 
 
+def _tokenize_documents(
+    path: pathlib.Path,
+    tokenizer: Tokenizer,
+    target_tokens: int,
+    max_tokens_per_doc: int,
+) -> list[torch.Tensor]:
+    documents: list[torch.Tensor] = []
+    total_tokens = 0
+    for document in _iter_documents(path):
+        encoded = tokenizer.encode(document)
+        if not encoded:
+            continue
+        tokens = torch.tensor(encoded, dtype=torch.long)
+        tokens = tokens[: max_tokens_per_doc + 1]
+        if tokens.numel() <= 1:
+            continue
+        documents.append(tokens)
+        total_tokens += tokens.numel()
+        if total_tokens >= target_tokens:
+            break
+    return documents
+
+
+def _build_document_aligned_windows(
+    documents: Sequence[torch.Tensor], seq_len: int, max_tokens_per_doc: int
+) -> list[torch.Tensor]:
+    windows: list[torch.Tensor] = []
+    for doc in documents:
+        usable = min(doc.numel(), max_tokens_per_doc + 1)
+        if usable <= seq_len:
+            continue
+        start = 0
+        while start + seq_len + 1 <= usable:
+            windows.append(doc[start : start + seq_len + 1])
+            start += seq_len
+    return windows
+
+
+def _iter_documents(path: pathlib.Path) -> Iterator[str]:
+    buffer: list[str] = []
+    with path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            if line.strip() == "":
+                if buffer:
+                    yield "".join(buffer)
+                    buffer = []
+                continue
+            buffer.append(line)
+        if buffer:
+            yield "".join(buffer)
+
+
 __all__ = [
     "Batch",
     "CharacterTokenizer",
     "Tokenizer",
     "WordTokenizer",
+    "DocumentAlignedDataset",
     "collate_batch",
     "TextDataset",
     "build_dataset",

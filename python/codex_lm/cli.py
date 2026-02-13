@@ -71,6 +71,28 @@ def _add_data_args(
         default=default_tokenizer,
         help="Tokenizer granularity (character or word/punctuation).",
     )
+    parser.add_argument(
+        "--document-alignment",
+        dest="document_alignment",
+        action="store_true",
+        default=True,
+        help=(
+            "Align training windows to document starts and cap each document to the first"
+            " N tokens. Disable with --no-document-alignment."
+        ),
+    )
+    parser.add_argument(
+        "--no-document-alignment",
+        dest="document_alignment",
+        action="store_false",
+        help="Disable document alignment and fall back to contiguous sampling across documents.",
+    )
+    parser.add_argument(
+        "--max-document-tokens",
+        type=int,
+        default=2048,
+        help="Maximum number of tokens retained from each document when document alignment is enabled.",
+    )
 
 
 def _resolve_dataset(choice: str, data_path: pathlib.Path | None) -> pathlib.Path:
@@ -91,8 +113,18 @@ def _load_tokenizer(
     seq_len: int,
     fraction: float,
     tokenizer_kind: str,
+    *,
+    document_aligned: bool,
+    max_document_tokens: int,
 ) -> tuple[Dataset, Dataset, Tokenizer]:
-    return build_dataset(path, seq_len, fraction=fraction, tokenizer=tokenizer_kind)  # type: ignore[arg-type]
+    return build_dataset(
+        path,
+        seq_len,
+        fraction=fraction,
+        tokenizer=tokenizer_kind,  # type: ignore[arg-type]
+        document_aligned=document_aligned,
+        max_document_tokens=max_document_tokens,
+    )
 
 
 def _coerce_model_config(config: Any) -> ModelConfig:
@@ -316,6 +348,8 @@ def _run_training(args: argparse.Namespace) -> None:
         preset_config.seq_len,
         args.data_frac,
         tokenizer_choice,
+        document_aligned=args.document_alignment,
+        max_document_tokens=args.max_document_tokens,
     )
     model_config = _maybe_adjust_config(preset_config, tokenizer)
 
@@ -413,6 +447,8 @@ def _run_generation(args: argparse.Namespace) -> None:
         model_config.seq_len,
         args.data_frac,
         tokenizer_choice,
+        document_aligned=args.document_alignment,
+        max_document_tokens=args.max_document_tokens,
     )
 
     model = TransformerLM(model_config)
