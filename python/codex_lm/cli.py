@@ -67,9 +67,9 @@ def _add_data_args(
     )
     parser.add_argument(
         "--tokenizer",
-        choices=["char", "word"],
+        choices=["char", "word", "bpe"],
         default=default_tokenizer,
-        help="Tokenizer granularity (character or word/punctuation).",
+        help="Tokenizer granularity (character, word/punctuation, or byte-pair encoding).",
     )
 
 
