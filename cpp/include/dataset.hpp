@@ -1,7 +1,6 @@
 #pragma once
 
-#include <torch/torch.h>
-
+#include <random>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -10,24 +9,33 @@ class CharacterTokenizer {
   public:
     explicit CharacterTokenizer(const std::string& text);
 
-    std::vector<int64_t> encode(const std::string& text) const;
-    std::string decode(const std::vector<int64_t>& tokens) const;
-    std::size_t vocab_size() const { return stoi_.size(); }
+    std::vector<int> encode(const std::string& text) const;
+    std::string decode(const std::vector<int>& tokens) const;
+    std::size_t vocab_size() const { return itos_.size(); }
 
   private:
     std::vector<char> itos_;
-    std::unordered_map<char, int64_t> stoi_;
+    std::unordered_map<char, int> stoi_;
 };
 
-class TextDataset : public torch::data::datasets::Dataset<TextDataset> {
-  public:
-    TextDataset(torch::Tensor tokens, std::size_t seq_len);
+struct Batch {
+    std::vector<int> input;
+    std::vector<int> target;
+    int batch_size = 0;
+    int seq_len = 0;
+};
 
-    torch::data::Example<> get(std::size_t index) override;
-    torch::optional<std::size_t> size() const override;
+class TextDataset {
+  public:
+    TextDataset(std::vector<int> tokens, std::size_t seq_len);
+
+    Batch sample(std::mt19937& rng, int batch_size) const;
+    Batch sample_sequential(std::size_t offset, int batch_size) const;
+    std::size_t size() const { return tokens_.size(); }
+    std::size_t seq_len() const { return seq_len_; }
 
   private:
-    torch::Tensor tokens_;
+    std::vector<int> tokens_;
     std::size_t seq_len_;
 };
 

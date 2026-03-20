@@ -1,67 +1,110 @@
 #pragma once
 
 #include "config.hpp"
+#include "ops.hpp"
 
-#include <torch/torch.h>
-
+#include <random>
+#include <utility>
 #include <vector>
 
-struct RMSNormImpl : torch::nn::Module {
-    RMSNormImpl(std::size_t dim, double eps = 1e-5);
-    torch::Tensor forward(const torch::Tensor& x);
+class LinearLayer {
+  public:
+    LinearLayer() = default;
+    LinearLayer(int in_dim, int out_dim, bool bias, std::mt19937& rng) { init(in_dim, out_dim, bias, rng); }
+
+    void init(int in_dim, int out_dim, bool bias, std::mt19937& rng);
+    void forward(const Tensor& input, Tensor& output) const;
 
   private:
-    torch::Tensor weight_;
-    double eps_;
+    Tensor weight_;
+    Tensor bias_;
+    bool has_bias_ = false;
 };
-TORCH_MODULE(RMSNorm);
 
-struct MultiHeadAttentionImpl : torch::nn::Module {
-    explicit MultiHeadAttentionImpl(const ModelConfig& config);
-    torch::Tensor forward(const torch::Tensor& x);
+class RMSNormLayer {
+  public:
+    RMSNormLayer() = default;
+    RMSNormLayer(int dim, float eps);
+
+    void forward(const Tensor& input, Tensor& output);
+
+  private:
+    Tensor weight_;
+    Tensor inv_rms_;
+    Tensor norm_cache_;
+    float eps_ = 1e-5f;
+};
+
+class FeedForward {
+  public:
+    FeedForward() = default;
+    FeedForward(const ModelConfig& config, std::mt19937& rng);
+
+    void forward(const Tensor& input, Tensor& output);
+
+  private:
+    LinearLayer fc1_;
+    LinearLayer fc2_;
+    Tensor hidden_;
+    Tensor activated_;
+};
+
+class MultiHeadAttention {
+  public:
+    MultiHeadAttention() = default;
+    MultiHeadAttention(const ModelConfig& config, std::mt19937& rng);
+
+    void forward(const Tensor& input, Tensor& output);
 
   private:
     ModelConfig config_;
-    torch::nn::Linear qkv_{nullptr};
-    torch::nn::Linear proj_{nullptr};
-    torch::Tensor mask_;
+    LinearLayer qkv_;
+    LinearLayer proj_;
+    float scale_ = 1.0f;
+    Tensor qkv_proj_;
+    Tensor q_;
+    Tensor k_;
+    Tensor v_;
+    Tensor scores_;
+    Tensor softmax_;
+    Tensor context_;
+    Tensor merged_;
 };
-TORCH_MODULE(MultiHeadAttention);
 
-struct FeedForwardImpl : torch::nn::Module {
-    explicit FeedForwardImpl(const ModelConfig& config);
-    torch::Tensor forward(const torch::Tensor& x);
+class TransformerBlock {
+  public:
+    TransformerBlock() = default;
+    TransformerBlock(const ModelConfig& config, std::mt19937& rng);
+
+    void forward(const Tensor& input, Tensor& output);
 
   private:
-    torch::nn::Linear fc1_{nullptr};
-    torch::nn::Linear fc2_{nullptr};
-    double dropout_;
+    RMSNormLayer norm1_;
+    MultiHeadAttention attn_;
+    RMSNormLayer norm2_;
+    FeedForward ff_;
+    Tensor norm1_out_;
+    Tensor attn_out_;
+    Tensor norm2_out_;
+    Tensor ff_out_;
 };
-TORCH_MODULE(FeedForward);
 
-struct TransformerBlockImpl : torch::nn::Module {
-    explicit TransformerBlockImpl(const ModelConfig& config);
-    torch::Tensor forward(const torch::Tensor& x);
+class TransformerLM {
+  public:
+    explicit TransformerLM(const ModelConfig& config);
+
+    const Tensor& forward(const std::vector<int>& tokens, int batch_size, int seq_len);
+    float loss(const std::vector<int>& targets) const;
 
   private:
     ModelConfig config_;
-    RMSNorm norm1_{nullptr};
-    MultiHeadAttention attn_{nullptr};
-    RMSNorm norm2_{nullptr};
-    FeedForward ff_{nullptr};
-};
-TORCH_MODULE(TransformerBlock);
-
-struct TransformerLMImpl : torch::nn::Module {
-    explicit TransformerLMImpl(const ModelConfig& config);
-    std::pair<torch::Tensor, torch::Tensor> forward(const torch::Tensor& idx, const torch::Tensor& targets);
-
-  private:
-    ModelConfig config_;
-    torch::nn::Embedding token_embedding_{nullptr};
+    Tensor embedding_;
     std::vector<TransformerBlock> blocks_;
-    RMSNorm norm_{nullptr};
-    torch::nn::Linear head_{nullptr};
+    RMSNormLayer norm_;
+    LinearLayer head_;
+    Tensor hidden_;
+    Tensor block_output_;
+    Tensor norm_out_;
+    Tensor logits_;
 };
-TORCH_MODULE(TransformerLM);
 

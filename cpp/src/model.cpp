@@ -1,92 +1,137 @@
 #include "model.hpp"
 
 #include <cmath>
-#include <string>
+#include <random>
+#include <stdexcept>
+#include <vector>
 
-#include <torch/indexing.h>
-#include <torch/nn/functional.h>
+namespace {
 
-RMSNormImpl::RMSNormImpl(std::size_t dim, double eps) : eps_(eps) {
-    weight_ = register_parameter("weight", torch::ones({static_cast<long>(dim)}));
+void init_normal(Tensor& tensor, std::mt19937& rng, float stddev) {
+    std::normal_distribution<float> dist(0.0f, stddev);
+    std::vector<float> host(tensor.size());
+    for (auto& v : host) {
+        v = dist(rng);
+    }
+    tensor.from_host(host);
 }
 
-torch::Tensor RMSNormImpl::forward(const torch::Tensor& x) {
-    auto variance = x.pow(2).mean(-1, true);
-    auto normed = x * torch::rsqrt(variance + eps_);
-    return normed * weight_;
+void init_constant(Tensor& tensor, float value) {
+    std::vector<float> host(tensor.size(), value);
+    tensor.from_host(host);
 }
 
-MultiHeadAttentionImpl::MultiHeadAttentionImpl(const ModelConfig& config) : config_(config) {
-    qkv_ = register_module("qkv", torch::nn::Linear(config.d_model, config.d_model * 3, false));
-    proj_ = register_module("proj", torch::nn::Linear(config.d_model, config.d_model, false));
-    mask_ = torch::tril(torch::ones({static_cast<long>(config.seq_len), static_cast<long>(config.seq_len)}));
-}
+}  // namespace
 
-torch::Tensor MultiHeadAttentionImpl::forward(const torch::Tensor& x) {
-    auto batch = x.size(0);
-    auto seq_len = x.size(1);
-    auto head_dim = config_.d_model / config_.n_heads;
-
-    auto qkv = qkv_->forward(x).view({batch, seq_len, 3, static_cast<long>(config_.n_heads), static_cast<long>(head_dim)});
-    qkv = qkv.permute({2, 0, 3, 1, 4});
-    auto q = qkv[0];
-    auto k = qkv[1];
-    auto v = qkv[2];
-
-    auto scores = torch::matmul(q, k.transpose(-2, -1)) / std::sqrt(static_cast<double>(head_dim));
-    auto mask = mask_.index({torch::indexing::Slice(0, seq_len), torch::indexing::Slice(0, seq_len)});
-    scores = scores.masked_fill(mask == 0, -1e9);
-    auto attn = torch::softmax(scores, -1);
-    auto out = torch::matmul(attn, v);
-    out = out.transpose(1, 2).contiguous().view({batch, seq_len, static_cast<long>(config_.d_model)});
-    return proj_->forward(out);
-}
-
-FeedForwardImpl::FeedForwardImpl(const ModelConfig& config) : dropout_(config.dropout) {
-    fc1_ = register_module("fc1", torch::nn::Linear(config.d_model, config.d_ff));
-    fc2_ = register_module("fc2", torch::nn::Linear(config.d_ff, config.d_model));
-}
-
-torch::Tensor FeedForwardImpl::forward(const torch::Tensor& x) {
-    auto out = torch::gelu(fc1_->forward(x));
-    out = torch::dropout(out, dropout_, is_training());
-    out = fc2_->forward(out);
-    return torch::dropout(out, dropout_, is_training());
-}
-
-TransformerBlockImpl::TransformerBlockImpl(const ModelConfig& config) : config_(config) {
-    norm1_ = register_module("norm1", RMSNorm(config.d_model));
-    attn_ = register_module("attn", MultiHeadAttention(config));
-    norm2_ = register_module("norm2", RMSNorm(config.d_model));
-    ff_ = register_module("ff", FeedForward(config));
-}
-
-torch::Tensor TransformerBlockImpl::forward(const torch::Tensor& x) {
-    auto attn_out = attn_->forward(norm1_->forward(x));
-    auto residual = x + attn_out;
-    auto ff_out = ff_->forward(norm2_->forward(residual));
-    return residual + ff_out;
-}
-
-TransformerLMImpl::TransformerLMImpl(const ModelConfig& config) : config_(config) {
-    token_embedding_ = register_module("token_embedding", torch::nn::Embedding(config.vocab_size, config.d_model));
-    norm_ = register_module("norm", RMSNorm(config.d_model));
-    head_ = register_module("head", torch::nn::Linear(config.d_model, config.vocab_size, false));
-    for (std::size_t i = 0; i < config.n_layers; ++i) {
-        auto name = "block_" + std::to_string(i);
-        auto block = TransformerBlock(config);
-        blocks_.push_back(register_module(name, block));
+void LinearLayer::init(int in_dim, int out_dim, bool bias, std::mt19937& rng) {
+    has_bias_ = bias;
+    weight_.allocate({out_dim, in_dim});
+    float stddev = 1.0f / std::sqrt(static_cast<float>(in_dim));
+    init_normal(weight_, rng, stddev);
+    if (bias) {
+        bias_.allocate({out_dim});
+        init_constant(bias_, 0.0f);
     }
 }
 
-std::pair<torch::Tensor, torch::Tensor> TransformerLMImpl::forward(const torch::Tensor& idx, const torch::Tensor& targets) {
-    auto x = token_embedding_->forward(idx);
+void LinearLayer::forward(const Tensor& input, Tensor& output) const {
+    linear_forward(input, weight_, bias_, output);
+}
+
+RMSNormLayer::RMSNormLayer(int dim, float eps) : eps_(eps) {
+    weight_.allocate({dim});
+    init_constant(weight_, 1.0f);
+}
+
+void RMSNormLayer::forward(const Tensor& input, Tensor& output) {
+    rmsnorm_forward(input, weight_, eps_, output, inv_rms_, norm_cache_);
+}
+
+FeedForward::FeedForward(const ModelConfig& config, std::mt19937& rng) {
+    fc1_.init(static_cast<int>(config.d_model), static_cast<int>(config.d_ff), true, rng);
+    fc2_.init(static_cast<int>(config.d_ff), static_cast<int>(config.d_model), true, rng);
+}
+
+void FeedForward::forward(const Tensor& input, Tensor& output) {
+    fc1_.forward(input, hidden_);
+    gelu_forward(hidden_, activated_);
+    fc2_.forward(activated_, output);
+}
+
+MultiHeadAttention::MultiHeadAttention(const ModelConfig& config, std::mt19937& rng) : config_(config) {
+    if (config.d_model % config.n_heads != 0) {
+        throw std::runtime_error("d_model must be divisible by n_heads");
+    }
+    qkv_.init(static_cast<int>(config.d_model), static_cast<int>(config.d_model * 3), false, rng);
+    proj_.init(static_cast<int>(config.d_model), static_cast<int>(config.d_model), false, rng);
+    scale_ = 1.0f / std::sqrt(static_cast<float>(config.d_model / config.n_heads));
+}
+
+void MultiHeadAttention::forward(const Tensor& input, Tensor& output) {
+    qkv_.forward(input, qkv_proj_);
+    split_qkv(qkv_proj_, static_cast<int>(config_.n_heads), q_, k_, v_);
+    attention_scores(q_, k_, scores_, scale_);
+    attention_mask_future(scores_);
+    copy_tensor(scores_, softmax_);
+    softmax_forward(softmax_);
+    attention_apply(softmax_, v_, context_);
+    combine_heads(context_, merged_);
+    proj_.forward(merged_, output);
+}
+
+TransformerBlock::TransformerBlock(const ModelConfig& config, std::mt19937& rng)
+    : norm1_(static_cast<int>(config.d_model), 1e-5f),
+      attn_(config, rng),
+      norm2_(static_cast<int>(config.d_model), 1e-5f),
+      ff_(config, rng) {}
+
+void TransformerBlock::forward(const Tensor& input, Tensor& output) {
+    norm1_.forward(input, norm1_out_);
+    attn_.forward(norm1_out_, attn_out_);
+    copy_tensor(input, output);
+    add_inplace(output, attn_out_);
+    norm2_.forward(output, norm2_out_);
+    ff_.forward(norm2_out_, ff_out_);
+    add_inplace(output, ff_out_);
+}
+
+TransformerLM::TransformerLM(const ModelConfig& config) : config_(config) {
+    if (config_.d_model % config_.n_heads != 0) {
+        throw std::runtime_error("d_model must be divisible by n_heads");
+    }
+    std::random_device rd;
+    std::mt19937 rng(rd());
+
+    embedding_.allocate({static_cast<int>(config_.vocab_size), static_cast<int>(config_.d_model)});
+    float stddev = 1.0f / std::sqrt(static_cast<float>(config_.d_model));
+    init_normal(embedding_, rng, stddev);
+
+    blocks_.reserve(config_.n_layers);
+    for (std::size_t i = 0; i < config_.n_layers; ++i) {
+        blocks_.emplace_back(config_, rng);
+    }
+    norm_ = RMSNormLayer(static_cast<int>(config_.d_model), 1e-5f);
+    head_.init(static_cast<int>(config_.d_model), static_cast<int>(config_.vocab_size), false, rng);
+}
+
+const Tensor& TransformerLM::forward(const std::vector<int>& tokens, int batch_size, int seq_len) {
+    if (static_cast<int>(tokens.size()) != batch_size * seq_len) {
+        throw std::runtime_error("Token batch has unexpected size");
+    }
+    embedding_forward(embedding_, tokens, batch_size, seq_len, hidden_);
+
+    Tensor* current = &hidden_;
+    Tensor* next = &block_output_;
     for (auto& block : blocks_) {
-        x = block->forward(x);
+        block.forward(*current, *next);
+        std::swap(current, next);
     }
-    x = norm_->forward(x);
-    auto logits = head_->forward(x);
-    auto loss = torch::nn::functional::cross_entropy(logits.view({-1, static_cast<long>(config_.vocab_size)}), targets.view({-1}));
-    return {logits, loss};
+    norm_.forward(*current, norm_out_);
+    head_.forward(norm_out_, logits_);
+    return logits_;
+}
+
+float TransformerLM::loss(const std::vector<int>& targets) const {
+    return cross_entropy_loss(logits_, targets);
 }
 

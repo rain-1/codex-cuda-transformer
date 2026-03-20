@@ -1,6 +1,6 @@
 # Codex CUDA Transformer
 
-This repository provides paired Python (PyTorch) and C++ (LibTorch/CUDA) reference implementations for a family of small decoder-only Transformer language models that are convenient for experimentation and education.
+This repository provides paired Python (PyTorch) and C++ (custom CUDA) reference implementations for a family of small decoder-only Transformer language models that are convenient for experimentation and education.
 
 ## Model presets
 
@@ -54,19 +54,19 @@ python -m codex_lm train pico tinystories --data-frac 0.1 --steps 2000 --wandb
 
 By default the script downloads the Tiny Shakespeare dataset and uses a character-level tokenizer. Use `--data custom --data-path /path/to/text.txt` to point at another corpus. Mixed precision, configurable gradient accumulation (`--gradient-accumulation-steps`), gradient checkpointing (`--gradient-checkpointing`), cosine scheduling, and optional `torch.compile` support are built in. Enable Weights & Biases logging with `--wandb` and optionally customize the project/run name via `--wandb-project` and `--wandb-run`.
 
-## C++/CUDA training
+## C++/CUDA inference demo
 
-The C++ training binary uses LibTorch with CUDA support. Configure CMake with an environment where `Torch_DIR` points to your LibTorch installation:
+The C++ build now relies solely on custom CUDA kernels rather than LibTorch. Configure CMake with access to the CUDA toolkit and build the standalone binary:
 
 ```bash
 mkdir -p cpp/build
 cd cpp/build
-cmake -DCMAKE_PREFIX_PATH="${LIBTORCH_PATH}" ..
+cmake ..
 cmake --build .
-./transformer_train --data ../../data/tinyshakespeare.txt --model pico --steps 2000 --wandb
+./transformer_train --data ../../data/tinyshakespeare.txt --model pico --steps 10
 ```
 
-The binary shares the same preset definitions and training tricks as the Python version. When `--wandb` is provided it streams metrics through the helper `codex_lm.wandb_stream` module, so ensure `python` dependencies are installed and available via `PYTHONPATH=../../python` when running the executable.
+The executable tokenizes the provided corpus, runs a forward pass of the Transformer on random mini-batches, and reports the average cross-entropy loss. It is intended as a compact reference for launching the CUDA kernels rather than a full training pipeline.
 
 ## Datasets
 
@@ -74,5 +74,5 @@ Text files are stored under the `data/` directory. The Python utilities can down
 
 ## Checkpoints
 
-Training checkpoints are emitted to `checkpoints/` by the Python trainer and to `cpp_last_model.pt` by the C++ binary. Both contain standard PyTorch state dictionaries that can be loaded for evaluation or fine-tuning.
+Training checkpoints are emitted to `checkpoints/` by the Python trainer. The C++ demo focuses on running the forward pass and does not persist model weights.
 
